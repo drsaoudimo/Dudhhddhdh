@@ -1,0 +1,67 @@
+@import url('https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg-paper: #FBF9F5;
+  --bg-surface: #F4F0E8;
+  --bg-card: #FFFFFF;
+  --border-hairline: #E2DDD2;
+  --text-ink: #1C1917;
+  --text-muted: #57534E;
+  --accent-lapis: #1E3A8A;
+  --accent-bronze: #9A3412;
+  --accent-forest: #14532D;
+  --font-serif-ar: 'Amiri', Georgia, serif;
+  --font-sans-ar: 'IBM Plex Sans Arabic', system-ui, sans-serif;
+  --font-mono-num: 'IBM Plex Mono', monospace;
+}
+
+body {
+  background-color: var(--bg-paper);
+  color: var(--text-ink);
+  font-family: var(--font-sans-ar);
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-serif-academic {
+  font-family: var(--font-serif-ar);
+}
+
+.font-mono,
+.font-mono-tabular {
+  font-family: var(--font-mono-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Isolate KaTeX and matrices strictly LTR inside RTL manuscript */
+.katex-ltr,
+.katex-display,
+.katex {
+  direction: ltr !important;
+  unicode-bidi: isolate;
+}
+
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.4rem 0;
+  margin: 0.5rem 0;
+}
+
+/* Subtle academic scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F4F0E8;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #C8C0B0;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #A89F8D;
+}

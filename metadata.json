@@ -1,0 +1,8 @@
+{
+  "name": "RSA Factorization Lab",
+  "description": "An educational simulation of RSA cryptography and factorization algorithms including Pollard's Rho and Quadratic Sieve concepts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
