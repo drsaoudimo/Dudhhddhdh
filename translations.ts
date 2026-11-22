@@ -9,6 +9,7 @@ export interface Translations {
   // Navigation / Tabs
   tabUnboundedQS: string;
   tabHybrid: string;
+  tabHgs: string;
   tabZeta: string;
   tabSimulator: string;
   tabAnalyzer: string;
@@ -28,6 +29,8 @@ export interface Translations {
   
   // Strategy selector
   strategyLabel: string;
+  stratHgsTitle: string;
+  stratHgsDesc: string;
   stratUnboundedQSTitle: string;
   stratUnboundedQSDesc: string;
   stratHybridTitle: string;
@@ -44,6 +47,17 @@ export interface Translations {
   stratPollardDesc: string;
   stratAlgebraicTitle: string;
   stratAlgebraicDesc: string;
+
+  // HGS Dashboard Strings
+  hgsDashboardTitle: string;
+  hgsDashboardSubtitle: string;
+  hgsFactorBase: string;
+  hgsSmoothRelations: string;
+  hgsF2Matrix: string;
+  hgsCongruence: string;
+  hgsFactorTree: string;
+  hgsSievedValues: string;
+  hgsLiveStage: string;
 
   // Actions
   startAttack: string;
@@ -195,6 +209,7 @@ export const translations: Record<Language, Translations> = {
 
     tabUnboundedQS: "المنخل التربيعي وتقليص mod 10⁶ (غير محدود)",
     tabHybrid: "لوحة التحكم الهجينة (Gleeok-MMFR)",
+    tabHgs: "الغربال الهجين الجيوديسي (HGS)",
     tabZeta: "رنين زيتا الطيفي (Zeta Zeros)",
     tabSimulator: "محاكي التحليل المباشر",
     tabAnalyzer: "المحلل الرياضي التفاعلي",
@@ -212,6 +227,8 @@ export const translations: Record<Language, Translations> = {
     bitsLabel: "بت",
 
     strategyLabel: "الخوارزمية الرياضية",
+    stratHgsTitle: "الغربال الهجين الجيوديسي (HGS)",
+    stratHgsDesc: "تطابق فرق المربعين Q(x) = (x+⌊√N⌋)² - N مع غربلة الكتل والمجالات وحل F₂ الجبري",
     stratUnboundedQSTitle: "المنخل التربيعي المستمر وتقليص mod 10⁶ (غير محدود)",
     stratUnboundedQSDesc: "محرك تنافسي مستمر بلا حدود يدمج نظرية استرجاع آحاد العوامل مع المنخل التربيعي المهيكل ومنحنيات مونتغمري المتصاعدة",
     stratHybridTitle: "رنين هجين مع غليووك (Gleeok-MMFR)",
@@ -219,6 +236,16 @@ export const translations: Record<Language, Translations> = {
     stratZetaTitle: "أصفار دالة زيتا لريمان (Zeta Spectral Resonance - حتى 1024 بت)",
     stratZetaDesc: "صيغة ريمان الصريحة وموجات الرنين التوافقية لأصفار زيتا غير التافهة لاستخراج القواسم والعوامل لأي عدد ضخم",
     stratMMFRTitle: "الرنين متعدد المضاعفات (MMFR)",
+
+    hgsDashboardTitle: "لوحة معلومات الغربال الهجين الجيوديسي (HGS Engine)",
+    hgsDashboardSubtitle: "تحليل تفاعلي متقدم بدون قيود خانات: قاعدة العوامل، العلاقات الملساء، مصفوفة F₂، تطابق المربعات، وشجرة العوامل الأولية",
+    hgsFactorBase: "قاعدة العوامل (Factor Base)",
+    hgsSmoothRelations: "العلاقات الملساء المكتشفة",
+    hgsF2Matrix: "مصفوفة التكافؤ F₂ (GF(2) Matrix)",
+    hgsCongruence: "تطابق فرق المربعين X² ≡ Y² (mod N)",
+    hgsFactorTree: "شجرة العوامل الأولية (Prime Factor Tree)",
+    hgsSievedValues: "القيم المفحوصة والمجتازة",
+    hgsLiveStage: "مرحلة الغربال الحالية",
     stratMMFRDesc: "ابتكار رياضي جديد للأعداد > 128 بت يدمج رنين ليمان مع فحص المربعات والـ ECM المسرع",
     stratGleeokTitle: "مصفوفة غليووك الجبرية (Gleeok)",
     stratGleeokDesc: "تحويلات جبرية على الشبكات والتباديل العشوائية",
@@ -368,6 +395,7 @@ export const translations: Record<Language, Translations> = {
 
     tabUnboundedQS: "Crible QS & Mod 10⁶ (Sans Limites)",
     tabHybrid: "Tableau de Bord Hybride (Gleeok-MMFR)",
+    tabHgs: "Crible Géodésique Hybride (HGS)",
     tabZeta: "Résonance Zêta (Zéros de Zêta)",
     tabSimulator: "Simulateur en Temps Réel",
     tabAnalyzer: "Analyseur Mathématique Interactif",
@@ -385,6 +413,8 @@ export const translations: Record<Language, Translations> = {
     bitsLabel: "bits",
 
     strategyLabel: "Méthode Mathématique",
+    stratHgsTitle: "Crible Géodésique Hybride (HGS)",
+    stratHgsDesc: "Congruence de carrés Q(x) = (x+⌊√N⌋)² - N avec crible par blocs logarithmique et résolution matricielle F₂",
     stratUnboundedQSTitle: "Crible QS Continu & mod 10⁶ (Sans Limites)",
     stratUnboundedQSDesc: "Moteur compétitif continu multi-voies combinant la reconstruction des unités premières avec le crible quadratique structuré et ECM infini",
     stratHybridTitle: "Hybride Gleeok-MMFR",
@@ -392,6 +422,16 @@ export const translations: Record<Language, Translations> = {
     stratZetaTitle: "Zéros de la Fonction Zêta de Riemann (jusqu'à 1024 bits)",
     stratZetaDesc: "Formule explicite de Riemann et résonance spectrale harmonique des zéros non triviaux pour factoriser tout grand entier",
     stratMMFRTitle: "Résonance Multi-Multiplicateurs (MMFR)",
+
+    hgsDashboardTitle: "Tableau de Bord du Crible Géodésique Hybride (HGS)",
+    hgsDashboardSubtitle: "Analyse interactive avancée sans limite : base de facteurs, relations lisses, matrice F₂, congruence et arbre de facteurs premiers",
+    hgsFactorBase: "Base de Facteurs (Factor Base)",
+    hgsSmoothRelations: "Relations Lisses Détectées",
+    hgsF2Matrix: "Matrice de Parité F₂ (GF(2) Matrix)",
+    hgsCongruence: "Congruence de Différence de Carrés X² ≡ Y² (mod N)",
+    hgsFactorTree: "Arbre des Facteurs Premiers (Prime Factor Tree)",
+    hgsSievedValues: "Valeurs criblées & filtrées",
+    hgsLiveStage: "Phase actuelle du crible",
     stratMMFRDesc: "Méthode novatrice pour > 128 bits combinant résonance spectrale de Lehman, crible quadratique et ECM accéléré",
     stratGleeokTitle: "Matrice Algébrique Gleeok",
     stratGleeokDesc: "Transformations algébriques sur réseaux et permutations pseudo-aléatoires",

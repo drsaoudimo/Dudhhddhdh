@@ -1,5 +1,18 @@
 import { A1_MATRIX, ANT_MATRIX, M_CORRECTED_MATRIX, M_MATRIX } from '../matricesData';
 import { isProbablePrimeBig } from './mathEngine';
+import {
+  BD500,
+  bdAbs,
+  bdAdd,
+  bdDiv,
+  bdFromNumber,
+  bdFromString,
+  bdMul,
+  bdSub,
+  bdToNumber,
+  bdToString,
+  bdZero
+} from './highPrecisionEngine';
 
 export interface ReferenceMatrixPreset {
   id: 'diff' | 'M' | 'ANT' | 'A1' | 'M_corrected';
@@ -124,23 +137,33 @@ const gcdArray = (arr: number[]): number => {
 export const computeMatrixRank = (matrix: number[][], eps = 1e-6): number => {
   const m = matrix.length;
   const n = matrix[0]?.length || 0;
-  const A = matrix.map(r => [...r]);
+  if (m === 0 || n === 0) return 0;
+  // Convert eps cleanly to BD500 scale (default 1e-6 -> exact threshold, or tiny tolerance 10^-250 if default eps used)
+  const epsBD = eps === 1e-6 ? 10n ** 280n : bdFromNumber(eps);
+  const A: BD500[][] = matrix.map(r => r.map(v => bdFromNumber(v)));
   let rank = 0;
   let col = 0;
 
   for (let row = 0; row < m && col < n; col++) {
     let pivot = row;
+    let maxAbs = bdAbs(A[row][col]);
     for (let i = row + 1; i < m; i++) {
-      if (Math.abs(A[i][col]) > Math.abs(A[pivot][col])) pivot = i;
+      const candAbs = bdAbs(A[i][col]);
+      if (candAbs > maxAbs) {
+        maxAbs = candAbs;
+        pivot = i;
+      }
     }
-    if (Math.abs(A[pivot][col]) <= eps) continue;
+    if (maxAbs <= epsBD) continue;
     [A[row], A[pivot]] = [A[pivot], A[row]];
     const div = A[row][col];
-    for (let j = col; j < n; j++) A[row][j] /= div;
+    for (let j = col; j < n; j++) A[row][j] = bdDiv(A[row][j], div);
     for (let i = 0; i < m; i++) {
-      if (i !== row && Math.abs(A[i][col]) > eps) {
+      if (i !== row && bdAbs(A[i][col]) > epsBD) {
         const factor = A[i][col];
-        for (let j = col; j < n; j++) A[i][j] -= factor * A[row][j];
+        for (let j = col; j < n; j++) {
+          A[i][j] = bdSub(A[i][j], bdMul(factor, A[row][j]));
+        }
       }
     }
     rank++;
@@ -154,8 +177,11 @@ export interface MatrixAnalysisReport {
   cols: number;
   isIntegerMatrix: boolean;
   totalSum: number;
+  totalSum500d: string;
   rowSums: number[];
+  rowSums500d: string[];
   colSums: number[];
+  colSums500d: string[];
   gcdRowSums: number;
   gcdColSums: number;
   estimatedRank: number;
@@ -172,11 +198,20 @@ export const analyzeMatrixStructure = (matrix: number[][]): MatrixAnalysisReport
   const cols = matrix[0]?.length || 0;
   const isIntegerMatrix = matrix.every(r => r.every(v => Math.abs(v - Math.round(v)) < 1e-9));
 
-  const rowSums = matrix.map(r => Number(r.reduce((a, b) => a + b, 0).toFixed(4)));
-  const colSums = new Array(cols).fill(0).map((_, j) =>
-    Number(matrix.reduce((acc, row) => acc + row[j], 0).toFixed(4))
+  const rowSumsBD = matrix.map(r => r.reduce((acc, v) => bdAdd(acc, bdFromNumber(v)), bdZero()));
+  const colSumsBD = new Array<BD500>(cols).fill(bdZero()).map((_, j) =>
+    matrix.reduce((acc, row) => bdAdd(acc, bdFromNumber(row[j])), bdZero())
   );
-  const totalSum = Number(rowSums.reduce((a, b) => a + b, 0).toFixed(4));
+  const totalSumBD = rowSumsBD.reduce((acc, v) => bdAdd(acc, v), bdZero());
+
+  const rowSums = rowSumsBD.map(v => Number(bdToNumber(v).toFixed(4)));
+  const colSums = colSumsBD.map(v => Number(bdToNumber(v).toFixed(4)));
+  const totalSum = Number(bdToNumber(totalSumBD).toFixed(4));
+
+  const rowSums500d = rowSumsBD.map(v => bdToString(v, 500, true));
+  const colSums500d = colSumsBD.map(v => bdToString(v, 500, true));
+  const totalSum500d = bdToString(totalSumBD, 500, true);
+  void bdFromString;
 
   let minVal = Infinity;
   let maxVal = -Infinity;
@@ -224,8 +259,11 @@ export const analyzeMatrixStructure = (matrix: number[][]): MatrixAnalysisReport
     cols,
     isIntegerMatrix,
     totalSum,
+    totalSum500d,
     rowSums,
+    rowSums500d,
     colSums,
+    colSums500d,
     gcdRowSums,
     gcdColSums,
     estimatedRank,

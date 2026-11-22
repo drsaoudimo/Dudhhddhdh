@@ -1,5 +1,18 @@
 import { bigIntSqrt, gcdBig, isProbablePrimeBig, modPowBig } from './mathEngine';
 import { runZf19Cfrac } from './zf19/cfracEngine';
+import {
+  bdAdd,
+  bdDiv,
+  bdFromNumber,
+  bdFromRational,
+  bdLn2,
+  bdMul,
+  bdMulInt,
+  bdOne,
+  bdSub,
+  bdToNumber,
+  bdToString
+} from './highPrecisionEngine';
 
 export interface PsiOperationCounters {
   modularMultiplies: number;
@@ -44,6 +57,8 @@ export interface WheelStats {
   phiW: number;
   survivalRatio: number;
   eliminatedPct: number;
+  survivalRatio500d?: string;
+  eliminatedPct500d?: string;
   residuesSample: number[];
 }
 
@@ -75,6 +90,9 @@ export interface PsiFactorResult {
   estimatedEnergyJ: number;
   landauerMinBitJ: number;
   equivalentLandauerBits: number;
+  estimatedEnergyJ500d?: string;
+  landauerMinBitJ500d?: string;
+  equivalentLandauerBits500d?: string;
   elapsedMs: number;
   stages: PsiStageLog[];
   wheelStats: WheelStats;
@@ -192,19 +210,41 @@ export const computeEstimatedEnergy = (
   c: PsiOperationCounters,
   elapsedMs: number,
   params: PsiEnergyParams = DEFAULT_PSI_ENERGY_PARAMS
-): { estimatedEnergyJ: number; landauerMinBitJ: number; equivalentLandauerBits: number } => {
-  const opEnergy =
-    c.modularMultiplies * params.eModMul +
-    c.gcdCalls * params.eGcd +
-    c.modularReductions * params.eMod +
-    c.integerDivisions * params.eDiv +
-    (c.otherSteps + c.ecmSteps + c.cfracIterations) * params.eOther;
+): {
+  estimatedEnergyJ: number;
+  landauerMinBitJ: number;
+  equivalentLandauerBits: number;
+  estimatedEnergyJ500d: string;
+  landauerMinBitJ500d: string;
+  equivalentLandauerBits500d: string;
+} => {
+  const opEnergyBD = bdAdd(
+    bdAdd(
+      bdMulInt(bdFromNumber(params.eModMul), c.modularMultiplies),
+      bdMulInt(bdFromNumber(params.eGcd), c.gcdCalls)
+    ),
+    bdAdd(
+      bdAdd(
+        bdMulInt(bdFromNumber(params.eMod), c.modularReductions),
+        bdMulInt(bdFromNumber(params.eDiv), c.integerDivisions)
+      ),
+      bdMulInt(bdFromNumber(params.eOther), c.otherSteps + c.ecmSteps + c.cfracIterations)
+    )
+  );
 
-  const estimatedEnergyJ = params.e0 + opEnergy + params.idlePowerWatts * (elapsedMs / 1000);
-  const landauerMinBitJ = BOLTZMANN_K * params.temperatureK * Math.LN2;
-  const equivalentLandauerBits = landauerMinBitJ > 0 ? estimatedEnergyJ / landauerMinBitJ : 0;
+  const idleBD = bdMul(bdFromNumber(params.idlePowerWatts), bdDiv(bdFromNumber(elapsedMs), bdFromNumber(1000)));
+  const estimatedEnergyBD = bdAdd(bdAdd(bdFromNumber(params.e0), opEnergyBD), idleBD);
+  const landauerMinBitBD = bdMul(bdMul(bdFromNumber(BOLTZMANN_K), bdFromNumber(params.temperatureK)), bdLn2());
+  const equivalentLandauerBitsBD = landauerMinBitBD > 0n ? bdDiv(estimatedEnergyBD, landauerMinBitBD) : 0n;
 
-  return { estimatedEnergyJ, landauerMinBitJ, equivalentLandauerBits };
+  return {
+    estimatedEnergyJ: bdToNumber(estimatedEnergyBD),
+    landauerMinBitJ: bdToNumber(landauerMinBitBD),
+    equivalentLandauerBits: bdToNumber(equivalentLandauerBitsBD),
+    estimatedEnergyJ500d: bdToString(estimatedEnergyBD, 500, false),
+    landauerMinBitJ500d: bdToString(landauerMinBitBD, 500, false),
+    equivalentLandauerBits500d: bdToString(equivalentLandauerBitsBD, 500, false)
+  };
 };
 
 const gcdNum = (a: number, b: number): number => {
@@ -225,8 +265,8 @@ export const computeWheelStats = (basisPrimes: number[]): WheelStats => {
     W *= p;
     phiW *= p - 1;
   }
-  const survivalRatio = phiW / W;
-  const eliminatedPct = (1 - survivalRatio) * 100;
+  const survivalRatioBD = bdFromRational(BigInt(phiW), BigInt(W));
+  const eliminatedPctBD = bdMulInt(bdSub(bdOne(), survivalRatioBD), 100);
 
   const residuesSample: number[] = [];
   for (let r = 1; r < W && residuesSample.length < 24; r++) {
@@ -237,8 +277,10 @@ export const computeWheelStats = (basisPrimes: number[]): WheelStats => {
     primes: [...basisPrimes],
     modulusW: W,
     phiW,
-    survivalRatio,
-    eliminatedPct,
+    survivalRatio: bdToNumber(survivalRatioBD),
+    eliminatedPct: bdToNumber(eliminatedPctBD),
+    survivalRatio500d: bdToString(survivalRatioBD, 500, false),
+    eliminatedPct500d: bdToString(eliminatedPctBD, 500, false),
     residuesSample
   };
 };
@@ -550,6 +592,9 @@ export const runPsiFactor = (nInput: bigint, options: PsiRunOptions = {}): PsiFa
       estimatedEnergyJ: energy.estimatedEnergyJ,
       landauerMinBitJ: energy.landauerMinBitJ,
       equivalentLandauerBits: energy.equivalentLandauerBits,
+      estimatedEnergyJ500d: energy.estimatedEnergyJ500d,
+      landauerMinBitJ500d: energy.landauerMinBitJ500d,
+      equivalentLandauerBits500d: energy.equivalentLandauerBits500d,
       elapsedMs,
       stages,
       wheelStats

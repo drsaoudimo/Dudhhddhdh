@@ -1,15 +1,16 @@
 import React, { useState } from 'react';
 import MathFormula from './MathFormula';
 import { classifyFactorsForMatrix, factorizeQuickWithTrace, QuickFactorResult } from '../lib/mathEngine';
+import { computeUniversalExponentReport } from '../lib/universalExponentEngine';
 import { V4_BENCHMARK_PRESETS } from '../v4FallbackOptimizer';
 
-export type PrimaryFactorAlgorithm = 'chronos-196' | 'cfrac' | 'coppersmith' | 'rsa-500plus' | 'zf18-19-lab' | 'psi-factor';
+export type PrimaryFactorAlgorithm = 'chronos-196' | 'cfrac' | 'zeta' | 'coppersmith' | 'rsa-500plus' | 'zf18-19-lab' | 'psi-factor';
 
 interface FactorizerModuleProps {
   nValue: string;
   onChangeN: (newN: string) => void;
   onGenerateRsaKey: (bits: number) => void;
-  onLaunchChronos: (targetN?: string, algOverride?: 'chronos-196' | 'cfrac') => void;
+  onLaunchChronos: (targetN?: string, algOverride?: 'chronos-196' | 'cfrac' | 'zeta') => void;
   onStopChronos: () => void;
   isChronosRunning: boolean;
   activeAlgorithm: PrimaryFactorAlgorithm;
@@ -63,9 +64,9 @@ export const FactorizerModule: React.FC<FactorizerModuleProps> = ({
     setErrorMsg(null);
     onChangeN(raw);
 
-    if (activeAlgorithm === 'chronos-196') {
+    if (activeAlgorithm === 'chronos-196' || activeAlgorithm === 'zeta') {
       setQuickResult(null);
-      onLaunchChronos(raw, 'chronos-196');
+      onLaunchChronos(raw, activeAlgorithm);
       return;
     }
 
@@ -102,6 +103,24 @@ export const FactorizerModule: React.FC<FactorizerModuleProps> = ({
     return null;
   }, [nValue, chronosFactors.join(','), quickResult]);
 
+  const universalExpReport = React.useMemo(() => {
+    if (!nValue.trim()) return null;
+    try {
+      let pHint: string | undefined;
+      let qHint: string | undefined;
+      if (chronosFactors.length >= 2) {
+        pHint = chronosFactors[0];
+        qHint = chronosFactors[1];
+      } else if (finalClassification?.blockPair) {
+        pHint = finalClassification.blockPair.p;
+        qHint = finalClassification.blockPair.q;
+      }
+      return computeUniversalExponentReport(nValue.trim(), 'standard', 0.258, pHint, qHint);
+    } catch {
+      return null;
+    }
+  }, [nValue, chronosFactors.join(','), finalClassification?.blockPair?.p, finalClassification?.blockPair?.q]);
+
   const canJumpToBlock =
     finalClassification?.blockPair &&
     BigInt(finalClassification.blockPair.p) <= 100000n &&
@@ -128,6 +147,7 @@ export const FactorizerModule: React.FC<FactorizerModuleProps> = ({
                 { id: 'chronos-196', label: 'Chronos v4 (السباق الموحد)' },
                 { id: 'rsa-500plus', label: 'منظومة &gt;500 بت (Wiener/BD/CADO)' },
                 { id: 'cfrac', label: 'الكسور المستمرة (CFRAC)' },
+                { id: 'zeta', label: 'أصفار زيتا والبذور الدقيقة (500d)' },
                 { id: 'coppersmith', label: 'كوبرسميث (MSB/LSB LLL)' },
                 { id: 'zf18-19-lab', label: 'مختبر ZF-18/19 والقبول' },
                 { id: 'psi-factor', label: 'Ψ-Factor وتجارب Ψ-3.1' }
@@ -192,7 +212,9 @@ export const FactorizerModule: React.FC<FactorizerModuleProps> = ({
                 >
                   {activeAlgorithm === 'cfrac'
                     ? 'فحص وتفكيك عبر CFRAC'
-                    : 'تشغيل السباق الموحد (Chronos v4)'}
+                    : (activeAlgorithm === 'zeta'
+                      ? 'تفكيك بأصفار زيتا والبذور الدقيقة'
+                      : 'تشغيل السباق الموحد (Chronos v4)')}
                 </button>
               ) : (
                 <button
@@ -206,13 +228,15 @@ export const FactorizerModule: React.FC<FactorizerModuleProps> = ({
                 onClick={() =>
                   onLaunchChronos(
                     inputDraft.replace(/[^0-9]/g, '') || nValue,
-                    activeAlgorithm === 'cfrac' ? 'cfrac' : 'chronos-196'
+                    activeAlgorithm === 'cfrac' ? 'cfrac' : (activeAlgorithm === 'zeta' ? 'zeta' : 'chronos-196')
                   )
                 }
                 disabled={isChronosRunning}
                 className="py-2.5 px-3 rounded-lg text-xs font-semibold bg-[#F4F0E8] border border-[#E2DDD2] hover:border-[#1E3A8A] text-[#1C1917] disabled:opacity-50 whitespace-nowrap"
               >
-                {activeAlgorithm === 'cfrac' ? 'تشغيل CFRAC فقط' : 'بدء السباق الآن'}
+                {activeAlgorithm === 'cfrac'
+                  ? 'تشغيل CFRAC فقط'
+                  : (activeAlgorithm === 'zeta' ? 'تشغيل محرك زيتا' : 'بدء السباق الآن')}
               </button>
             </div>
 
@@ -285,6 +309,76 @@ export const FactorizerModule: React.FC<FactorizerModuleProps> = ({
                   {chronosSolution.method} {chronosSolution.duration ? `(${chronosSolution.duration} ms)` : ''}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Universal Exponent (الأس العام) & Number-Theoretic Invariants */}
+          {universalExpReport && (
+            <div className="bg-[#FBF9F5] p-4 rounded-lg border border-[#E2DDD2] space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#E2DDD2] pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-bold text-[#1E3A8A]">الأس العام وثوابت التشفير</span>
+                  <span className="text-[11px] px-2 py-0.5 rounded bg-white border border-[#E2DDD2] text-[#14532D] font-bold">
+                    {universalExpReport.isComplete ? '✓ محسوب بدقة تامة' : 'ℹ مضمون قياسياً (PKCS#1)'}
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono-tabular text-[#57534E]" dir="ltr">
+                  N: {universalExpReport.nBits} bits · gcd(e, λ) = {universalExpReport.gcdEWithLambda}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono-tabular" dir="ltr">
+                <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                  <span className="text-[10px] text-[#57534E] block">الأس العام الأصغر λ(N) Carmichael</span>
+                  <span className="font-bold text-[#1E3A8A] text-sm break-all block mt-0.5">
+                    {universalExpReport.lambdaN.length > 28 ? `${universalExpReport.lambdaN.slice(0, 24)}...` : universalExpReport.lambdaN}
+                  </span>
+                  <span className="text-[9px] text-[#57534E] block mt-1">a^λ(N) ≡ 1 (mod N)</span>
+                </div>
+
+                <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                  <span className="text-[10px] text-[#57534E] block">مؤشر أويلر φ(N) Euler Totient</span>
+                  <span className="font-bold text-[#1C1917] text-sm break-all block mt-0.5">
+                    {universalExpReport.phiN.length > 28 ? `${universalExpReport.phiN.slice(0, 24)}...` : universalExpReport.phiN}
+                  </span>
+                  <span className="text-[9px] text-[#57534E] block mt-1">نسبة الاختصار φ/λ: {universalExpReport.reductionRatio}</span>
+                </div>
+
+                <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                  <span className="text-[10px] text-[#57534E] block">الأس العام للتشفير e (Public Exp)</span>
+                  <span className="font-bold text-[#14532D] text-sm break-all block mt-0.5">
+                    {universalExpReport.publicExponentE}
+                  </span>
+                  <span className="text-[9px] text-[#14532D] block mt-1">gcd(e, λ(N)) = 1 (أولي نسبياً)</span>
+                </div>
+
+                <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                  <span className="text-[10px] text-[#57534E] block">الأس الخاص d ≡ e⁻¹ (mod λ(N))</span>
+                  <span className="font-bold text-[#9A3412] text-sm break-all block mt-0.5">
+                    {universalExpReport.privateExponentD
+                      ? (universalExpReport.privateExponentD.length > 28 ? `${universalExpReport.privateExponentD.slice(0, 24)}...` : universalExpReport.privateExponentD)
+                      : 'قيد الاستخراج عبر Chronos'}
+                  </span>
+                  <span className="text-[9px] text-[#57534E] block mt-1">
+                    {universalExpReport.dBits ? `|d| = ${universalExpReport.dBits} bits` : 'يتطلب فك N لمودول مجهول'}
+                  </span>
+                </div>
+              </div>
+
+              {universalExpReport.crt && (
+                <div className="bg-white p-2.5 rounded border border-[#E2DDD2] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono-tabular" dir="ltr">
+                  <div className="text-[#57534E]">معاملات البواقي الصينية (CRT Exponents):</div>
+                  <div className="text-[#1C1917]">
+                    <span className="text-[#57534E]">d_p =</span> {universalExpReport.crt.dp.slice(0, 16)}... |{' '}
+                    <span className="text-[#57534E]">d_q =</span> {universalExpReport.crt.dq.slice(0, 16)}... |{' '}
+                    <span className="text-[#57534E]">q_inv =</span> {universalExpReport.crt.qInv.slice(0, 16)}...
+                  </div>
+                </div>
+              )}
+
+              <p className="text-xs text-[#57534E] leading-relaxed">
+                {universalExpReport.explanationAr}
+              </p>
             </div>
           )}
 

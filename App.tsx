@@ -11,6 +11,7 @@ import Zf1819LabPanel from './components/Zf1819LabPanel';
 import PsiFactorLabPanel from './components/PsiFactorLabPanel';
 import Rsa500PlusLabPanel from './components/Rsa500PlusLabPanel';
 import CfracTelemetryPanel from './components/CfracTelemetryPanel';
+import ZetaFactorPanel, { ZetaLiveTrace } from './components/ZetaFactorPanel';
 import MatrixInspectorModule from './components/MatrixInspectorModule';
 import InfiniteMatrixModule from './components/InfiniteMatrixModule';
 import ZetaSpectrumModule from './components/ZetaSpectrumModule';
@@ -25,10 +26,22 @@ import { ZETA_WORKER_CODE } from './zetaWorker';
 import { UNBOUNDED_QS_WORKER_CODE } from './unboundedQsWorker';
 import { CHRONOS_WORKER_CODE } from './chronosWorker';
 import { CFRAC_WORKER_CODE } from './cfracWorker';
-import { buildMpqsFactorBase, buildCfracFactorBase, selectKnuthSchroeppelMultiplier, solveBlockWiedemann, SingleLargePrimePool, isProbablePrimeBig, SmoothRelation } from './mpqsGf2Solver';
+import {
+  buildMpqsFactorBase,
+  buildCfracSharedUnionFactorBase,
+  CfracSharedUnionFb,
+  selectKnuthSchroeppelMultiplier,
+  selectRankedKnuthSchroeppelMultipliers,
+  solveBlockWiedemann,
+  SingleLargePrimePool,
+  isProbablePrimeBig,
+  SmoothRelation
+} from './mpqsGf2Solver';
 import { analyzeSnfsAndCadoParams } from './snfsDetector';
 import { computeV4SieveDiagnostics, EmpiricalBenchmarkRun, SieveAllocationMode } from './v4FallbackOptimizer';
 import { runUnifiedFastScout, UnifiedRaceHints, UnifiedRaceSummary } from './lib/chronosUnifiedRace';
+import { generateUltraPreciseZetaSeeds, UltraPreciseZetaSeed } from './lib/zfSmartIntegrator';
+import { benchmarkRedcVsNaive, getWorkerMontRedcCode, RedcBenchmarkResult } from './lib/montgomeryRedcKernel';
 import { Language, translations } from './translations';
 
 interface GleeokStats {
@@ -65,7 +78,8 @@ const App: React.FC = () => {
   const [primaryAlgorithm, setPrimaryAlgorithm] = useState<PrimaryFactorAlgorithm>('chronos-196');
   const [view, setView] = useState<'factorizer' | 'inspector' | 'infinite' | 'zeta' | 'zf-summary'>('factorizer');
   const [selectedBlockPair, setSelectedBlockPair] = useState<{ p: number; q: number }>({ p: 7, q: 53 });
-  const [zetaTrace, setZetaTrace] = useState<any>(null);
+  const [zetaTrace, setZetaTrace] = useState<ZetaLiveTrace | null>(null);
+  const [bd500ZetaSeeds, setBd500ZetaSeeds] = useState<UltraPreciseZetaSeed[]>([]);
 
   // Chronos v2 Hybrid states
   const [chronosCycle, setChronosCycle] = useState<number>(1);
@@ -159,6 +173,26 @@ const App: React.FC = () => {
     elapsedMs: 0,
     totalOperations: 0
   });
+  const [redcSpeedupInfo, setRedcSpeedupInfo] = useState<RedcBenchmarkResult | null>(null);
+
+  useEffect(() => {
+    const rawN = rsaKey?.n?.trim();
+    if (!rawN) {
+      setRedcSpeedupInfo(null);
+      return;
+    }
+    try {
+      const nBig = BigInt(rawN);
+      if (nBig > 2n && (nBig & 1n) === 1n) {
+        const res = benchmarkRedcVsNaive(nBig, 'gf2-solver');
+        setRedcSpeedupInfo(res);
+      } else {
+        setRedcSpeedupInfo(null);
+      }
+    } catch {
+      setRedcSpeedupInfo(null);
+    }
+  }, [rsaKey?.n]);
 
   const workersRef = useRef<Worker[]>([]);
   const workerUrlsRef = useRef<string[]>([]);
@@ -177,16 +211,20 @@ const App: React.FC = () => {
   const targetBits = rsaKey?.bits || 196;
   const effectiveWorkerCount = workerCountMode === 'auto' ? getAutoWorkersCount(targetBits) : workerCountMode;
 
-  const ecmWorkerCode = `
+  const ecmWorkerCode = getWorkerMontRedcCode() + `
     const gcd = (a, b) => {
-        while (b > 0n) { let t = b; b = a % b; a = t; }
-        return a;
+        let x = a < 0n ? -a : a;
+        let y = b < 0n ? -b : b;
+        while (y > 0n) { let t = y; y = x % y; x = t; }
+        return x;
     };
     const modInverse = (a, m) => {
         let m0 = m, t, q;
         let x0 = 0n, x1 = 1n;
+        a = ((a % m) + m) % m;
         if (m === 1n) return 0n;
         while (a > 1n) {
+            if (m === 0n) return 0n;
             q = a / m;
             t = m;
             m = a % m;
@@ -198,62 +236,72 @@ const App: React.FC = () => {
         if (x1 < 0n) x1 += m0;
         return x1;
     };
-    const ecmAttack = async (N) => {
-        if (N % 2n === 0n) return { factor: 2n, attempts: 1 };
-        if (N % 3n === 0n) return { factor: 3n, attempts: 1 };
-
-        const B1 = 20000; 
+    const getPrimesUpTo = (limit) => {
         const primes = [];
-        const sieve = new Uint8Array(B1 + 1);
-        for (let i = 2; i <= B1; i++) {
+        const sieve = new Uint8Array(limit + 1);
+        for (let i = 2; i <= limit; i++) {
             if (!sieve[i]) {
                 primes.push(i);
-                for (let j = i * i; j <= B1; j += i) sieve[j] = 1;
+                for (let j = i * i; j <= limit; j += i) sieve[j] = 1;
             }
         }
+        return primes;
+    };
+    const ecmAttack = async (N) => {
+        if ((N & 1n) === 0n) return { factor: 2n, attempts: 1 };
+        if (N % 3n === 0n) return { factor: 3n, attempts: 1 };
 
-        let k_factors = [];
-        for (const p of primes) {
-            let power = p;
-            while (power * p <= B1) power *= p;
-            k_factors.push(BigInt(power));
-        }
+        const nBits = N.toString(2).length;
+        const ctx = createMontgomeryCtx(N);
+        const redcBench = benchmarkWorkerRedcVsNaive(ctx, 'web-worker');
+        self.postMessage({ type: 'chronos_redc_benchmark', ...redcBench });
+
+        const B1 = nBits > 500 ? 50000 : 20000;
+        const B2 = nBits > 500 ? 1500000 : 480000;
+        const primesB1 = getPrimesUpTo(B1);
 
         let attempts = 0;
-        const maxAttempts = 100;
+        const maxAttempts = 80;
         while (attempts < maxAttempts) {
             attempts++;
-            const sigma = BigInt(Math.floor(Math.random() * 100000)) + 6n;
-            const u = (sigma * sigma - 5n + N) % N;
-            const v = (4n * sigma) % N;
-            
-            const diff = (v - u + N) % N;
-            const num = (diff * diff % N * diff % N * (3n * u + v)) % N;
-            const den = (16n * u % N * u % N * u % N * v) % N;
-            
-            const gDen = gcd(den, N);
-            if (gDen > 1n && gDen < N) return { factor: gDen, attempts };
-            if (gDen === N) continue;
-
-            const invDen = modInverse(den, N);
-            const a = (num * invDen - 2n + N) % N;
-
-            let x = (u * u % N * u % N * invDen) % N;
-            let z = 1n;
-
-            for (let i = 0; i < k_factors.length; i++) {
-                const kVal = k_factors[i];
-                let currentK = kVal;
-                while (currentK > 0n) {
-                    const d = gcd(z, N);
-                    if (d > 1n && d < N) return { factor: d, attempts };
-                    z = (z * currentK) % N;
-                    currentK /= 2n;
-                }
+            const sigma = BigInt(attempts * 31337 + 17) + (BigInt(Math.floor(Math.random() * 100000)) + 6n);
+            const res = runUnifiedEcmStage1And2(
+                N,
+                sigma,
+                B1,
+                B2,
+                primesB1,
+                modInverse,
+                gcd,
+                (prog) => {
+                    self.postMessage({
+                        type: 'chronos_suyama_stage',
+                        workerId: 0,
+                        totalWorkers: 1,
+                        role: 'ecm',
+                        cycle: 1,
+                        curveIndex: attempts,
+                        sigma: sigma.toString() + ' · ' + (prog.curveFamily === 'montgomery' ? 'Montgomery' : 'Suyama'),
+                        b1Bound: B1,
+                        b2Bound: B2,
+                        torsionCertified: true,
+                        stagePhase: prog.stagePhase,
+                        curveFamily: prog.curveFamily,
+                        autoSwitchReason: prog.autoSwitchReason,
+                        b2ProgressPct: prog.b2ProgressPct,
+                        b2GiantStepsDone: prog.b2GiantStepsDone,
+                        b2GiantStepsTotal: prog.b2GiantStepsTotal,
+                        dStep: prog.dStep
+                    });
+                },
+                ctx
+            );
+            if (res && res.factor && res.factor > 1n && res.factor < N) {
+                return { factor: res.factor, attempts, stage: res.stage };
             }
-
-            if (attempts % 5 === 0) {
+            if (attempts % 2 === 0) {
                 self.postMessage({ type: 'progress', steps: attempts, total: maxAttempts });
+                await new Promise(r => setTimeout(r, 0));
             }
         }
         return null;
@@ -263,9 +311,9 @@ const App: React.FC = () => {
         const { n, type } = e.data;
         if (type === 'start') {
             try {
-                self.postMessage({ type: 'log', message: "Initializing Elliptic Curves (ECM)..." });
+                self.postMessage({ type: 'log', message: "Initializing Unified Montgomery-REDC ECM Stage 1 + Stage 2 (B2)..." });
                 const res = await ecmAttack(BigInt(n));
-                self.postMessage({ type: 'result', factor: res ? res.factor.toString() : null, method: "ECM", steps: res ? res.attempts : 0 });
+                self.postMessage({ type: 'result', factor: res ? res.factor.toString() : null, method: res?.stage || "ECM Stage 1+2 REDC", steps: res ? res.attempts : 0 });
             } catch (err) {
                 self.postMessage({ type: 'error', message: err.message });
             }
@@ -410,6 +458,8 @@ const App: React.FC = () => {
 
       setRsaKey({ n: nBig.toString(), p: "???", q: "???", e: "65537", d: "???", bits: bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+      setZetaTrace(null);
+      setBd500ZetaSeeds([]);
       setShowInputN(false);
       setCustomN("");
       setHybridFingerprint(null);
@@ -444,6 +494,8 @@ const App: React.FC = () => {
 
       setRsaKey({ n: nStr, p, q, e: eStr, d, bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+      setZetaTrace(null);
+      setBd500ZetaSeeds([]);
       if (eStr && eStr !== '65537') {
         setUnifiedHints(prev => ({ ...prev, publicExponentE: eStr }));
       }
@@ -473,6 +525,8 @@ const App: React.FC = () => {
       const bits = nBig.toString(2).length;
       setRsaKey({ n: cleanN, p: "???", q: "???", e: "65537", d: "???", bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+      setZetaTrace(null);
+      setBd500ZetaSeeds([]);
       setSimState({
         status: 'idle',
         logs: [`>> Benchmark Selected: ${bits}-bit Target Modulus.`, `N = ${cleanN}`],
@@ -482,7 +536,7 @@ const App: React.FC = () => {
         solution: null
       });
       setView('factorizer');
-      if (primaryAlgorithm !== 'cfrac') {
+      if (primaryAlgorithm !== 'cfrac' && primaryAlgorithm !== 'zeta') {
         setStrategy('chronos-196');
       }
       setChronosMDual(null);
@@ -499,6 +553,8 @@ const App: React.FC = () => {
       const bits = nBig.toString(2).length;
       setRsaKey({ n: cleanN, p: "???", q: "???", e: "65537", d: "???", bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+      setZetaTrace(null);
+      setBd500ZetaSeeds([]);
       setSimState({
         status: 'idle',
         logs: [`>> Target Modulus Updated: ${bits}-bit.`, `N = ${cleanN}`],
@@ -515,7 +571,7 @@ const App: React.FC = () => {
 
   const runAttack = async (
     overrideN?: string,
-    strategyOverride?: 'chronos-196' | 'cfrac',
+    strategyOverride?: 'chronos-196' | 'cfrac' | 'zeta',
     hintsOverride?: UnifiedRaceHints
   ) => {
     const activeStrat = strategyOverride || strategy;
@@ -552,7 +608,7 @@ const App: React.FC = () => {
       ...prev,
       status: 'sieving',
       logs: [
-        `>> Launching [${activeStrat === 'chronos-196' ? 'CHRONOS-V4 UNIFIED RACE' : activeStrat.toUpperCase()}] Solver...`,
+        `>> Launching [${activeStrat === 'chronos-196' ? 'CHRONOS-V4 UNIFIED RACE' : (activeStrat === 'zeta' ? 'ZETA 48-ZEROS · 500d/160d SPECTRAL ENGINE' : activeStrat.toUpperCase())}] Solver...`,
         `>> Modulus length: ${nBitsInit} bits.`
       ],
       solution: null,
@@ -570,6 +626,7 @@ const App: React.FC = () => {
     setHybridEcmStats(null);
     setChronosMDual(null);
     setCfracInfo(null);
+    setZetaTrace(null);
     setCurrentStage(1);
 
     if (activeStrat === 'chronos-196') {
@@ -589,19 +646,44 @@ const App: React.FC = () => {
       const nBitsVal = nBig.toString(2).length;
       const isChronos = activeStrat === 'chronos-196';
       const isCfrac = activeStrat === 'cfrac';
+      const isZeta = activeStrat === 'zeta';
 
-      // Fast Unified Race Scout (Ψ-Factor + >500b SNFS/Wiener/BD + ZF-18 Coppersmith + ZF-15/17 Spectral Guidance)
+      // Fast Unified Race Scout (Ψ-Factor + >500b SNFS/Wiener/BD + ZF-18 Coppersmith + ZF-15/17 Spectral Guidance + 500d Zeta Seeds)
       let scoutOps = 0;
-      let zfWorkerSeeds: Array<{ seedOffset: number; recommendedMultiplier: number }> = [];
+      let zfWorkerSeeds: Array<{
+        seedOffset: number;
+        recommendedMultiplier: number;
+        zetaSigmaSeed?: string;
+        zetaRhoSeed?: string;
+      }> = [];
+
+      if (isZeta) {
+        try {
+          const seeds500 = generateUltraPreciseZetaSeeds(nBig, 6, 48);
+          setBd500ZetaSeeds(seeds500);
+          if (seeds500.length > 0) {
+            addLog(`>> [BD500 Zeta Seeds] 48 zeros active · Peak#1 δ*=${seeds500[0].delta500d.slice(0, 16)} · p_seed≈${seeds500[0].candidatePSeed.slice(0, 16)}... · σ=${seeds500[0].ecmSigmaSeed} · k=${seeds500[0].suggestedK}`);
+          }
+        } catch {}
+      }
 
       if (isChronos) {
         const scout = runUnifiedFastScout(nBig, effectiveWorkerCount, activeHints);
         scoutOps = scout.scoutOps;
+        if (scout.zfGuidance?.zetaSeeds?.length) {
+          setBd500ZetaSeeds(scout.zfGuidance.zetaSeeds);
+        }
         if (scout.zfGuidance?.workerGuidance) {
-          zfWorkerSeeds = scout.zfGuidance.workerGuidance.map(g => ({
-            seedOffset: g.seedOffset,
-            recommendedMultiplier: g.recommendedMultiplier
-          }));
+          const zSeedsList = scout.zfGuidance.zetaSeeds || [];
+          zfWorkerSeeds = scout.zfGuidance.workerGuidance.map((g, idx) => {
+            const zs = zSeedsList[idx % Math.max(1, zSeedsList.length)];
+            return {
+              seedOffset: g.seedOffset,
+              recommendedMultiplier: g.recommendedMultiplier,
+              zetaSigmaSeed: g.zetaSigmaSeed || zs?.ecmSigmaSeed,
+              zetaRhoSeed: zs?.rhoSeed
+            };
+          });
         }
 
         if (scout.hit && scout.factors.length > 0) {
@@ -640,11 +722,12 @@ const App: React.FC = () => {
 
       // Worker Pool Configuration:
       // In Unified Chronos v4 mode (<=220b): 1 ECM/p±1 Worker + 1 CFRAC Worker + (N-2) Chronos SIQS Workers sharing ONE GF(2) Matrix!
-      // In Unified Chronos v4 mode (>220b): All workers race REDC ECM + p-1 + p+1 with ZF-16 spectral seeds.
+      // In Unified Chronos v4 mode (>220b): All workers race REDC ECM + p-1 + p+1 with 500d Zeta spectral seeds.
+      // In standalone CFRAC mode: All effectiveWorkerCount workers race distinct KS multipliers into ONE shared Union GF(2) Matrix!
       const useSiqsUnified = isChronos && nBitsVal <= 220;
       const numWorkers = isChronos
         ? (useSiqsUnified ? Math.max(3, effectiveWorkerCount) : effectiveWorkerCount)
-        : 1;
+        : (isCfrac ? Math.max(1, effectiveWorkerCount) : 1);
       workersRef.current = [];
 
       const chronosBlob = new Blob([CHRONOS_WORKER_CODE], { type: 'application/javascript' });
@@ -691,12 +774,17 @@ const App: React.FC = () => {
           curves: 0,
           polys: 0,
           relations: 0,
-          stage: roleVal === 'cfrac' ? 'CFRAC √(kN) → GF(2)' : (roleVal === 'ecm' ? 'REDC ECM + p±1' : 'SIQS v4 → GF(2)'),
+          stage: roleVal === 'cfrac' ? 'CFRAC Fast-2LP √(kN) → GF(2)' : (roleVal === 'ecm' ? 'Zeta REDC ECM + p±1' : 'SIQS v4 → GF(2)'),
           active: true
         }))
       );
 
-      const ksResult = useSiqsUnified ? selectKnuthSchroeppelMultiplier(nBig) : { k: 1 };
+      const ksResult = useSiqsUnified
+        ? selectKnuthSchroeppelMultiplier(nBig)
+        : (isCfrac ? (() => {
+            const rankedRes = selectRankedKnuthSchroeppelMultipliers(nBig, 1);
+            return { k: rankedRes.ranked[0] ?? 1, directFactor: rankedRes.directFactor };
+          })() : { k: 1 });
       if (ksResult.directFactor && ksResult.directFactor > 1n && ksResult.directFactor < nBig) {
         const f1 = ksResult.directFactor;
         const f2 = nBig / f1;
@@ -720,18 +808,27 @@ const App: React.FC = () => {
 
       const optK = ksResult.k;
       const siqsM = BigInt(optK) * nBig;
-      const CFRAC_MULTIPLIERS = useSiqsUnified
-        ? [optK, ...[1, 3, 5, 7, 11, 13, 15, 17, 19, 21, 23, 29].filter(v => v !== optK)]
-        : [1, 3, 5, 7, 11, 13, 15, 17, 19, 21, 23, 29];
+      const rankedKsAll = isCfrac
+        ? selectRankedKnuthSchroeppelMultipliers(nBig, Math.max(18, numWorkers + 12)).ranked
+        : [optK, ...[1, 3, 5, 7, 11, 13, 15, 17, 19, 21, 23, 29].filter(v => v !== optK)];
+      const CFRAC_MULTIPLIERS = rankedKsAll.length > 0 ? rankedKsAll : [1, 3, 5, 7, 11, 13, 17];
+
+      const cfracUnionFb: CfracSharedUnionFb | null = isCfrac
+        ? buildCfracSharedUnionFactorBase(nBig, CFRAC_MULTIPLIERS.slice(0, Math.min(CFRAC_MULTIPLIERS.length, numWorkers + 6)))
+        : null;
+
       let cfracMultIdx = 0;
       let activeCfracK = CFRAC_MULTIPLIERS[0];
+      const workerCfracKMap: number[] = Array.from({ length: numWorkers }, (_, idx) => CFRAC_MULTIPLIERS[idx % CFRAC_MULTIPLIERS.length]);
+      let nextCfracQueueIdx = numWorkers;
+      let exhaustedCfracWorkers = 0;
 
-      // Shared Factor Base & Single+Double Large Prime Pool so SIQS + CFRAC build ONE unified GF(2) Matrix
-      let activeFb = isCfrac
-        ? buildCfracFactorBase(BigInt(activeCfracK) * nBig)
+      // Shared Factor Base & Single+Double Large Prime Pool so all CFRAC workers (or SIQS + CFRAC) share ONE GF(2) Matrix
+      const activeFb = isCfrac && cfracUnionFb
+        ? { primes: cfracUnionFb.sharedPrimes, roots: [] as number[], logs: [] as number[], largePrimeBound: cfracUnionFb.largePrimeBound }
         : (useSiqsUnified ? buildMpqsFactorBase(nBig, siqsM) : { primes: [], roots: [], logs: [], largePrimeBound: 0 });
-      let lpPool = new SingleLargePrimePool(nBig, activeFb.primes);
-      let targetRelations = activeFb.primes.length + (nBitsVal >= 160 ? 14 : (isCfrac ? 6 : 10));
+      const lpPool = new SingleLargePrimePool(nBig, activeFb.primes);
+      const targetRelations = activeFb.primes.length + (nBitsVal >= 160 ? 14 : (isCfrac ? 6 : 10));
       const v4Diag = computeV4SieveDiagnostics();
       const activeSieveWeights = sieveMode === 'v4-fallback'
         ? { rowMedians: v4Diag.rowMedians, colPriors: v4Diag.colPriors6 }
@@ -773,6 +870,7 @@ const App: React.FC = () => {
       }
 
       if (isCfrac) {
+        const activeKsStr = workerCfracKMap.slice(0, numWorkers).join(',');
         setCfracInfo({
           kMultiplier: activeCfracK,
           steps: 0,
@@ -782,20 +880,20 @@ const App: React.FC = () => {
           smoothRelations: 0,
           partialRelations: 0,
           lpCollisions: 0,
-          statusLabel: `نشر الكسر المستمر للعدد √(${activeCfracK}N)`
+          statusLabel: `نشر متوازٍ (${numWorkers} خيوط · k=[${activeKsStr}])`
         });
         setGf2Stats({
           collected: 0,
           target: targetRelations,
           factorBaseSize: activeFb.primes.length,
           matrixSolves: 0,
-          lastSource: `CFRAC (k=${activeCfracK})`,
+          lastSource: `Parallel CFRAC ×${numWorkers} (Union QR-FB)`,
           partialCount: 0,
           lpCollisions: 0,
           krylovSteps: 0,
           coreShape: ''
         });
-        addLog(`>> CFRAC Engine Active: k=${activeCfracK}, QR-FB=${activeFb.primes.length}, L_max=${activeFb.largePrimeBound}.`);
+        addLog(`>> Parallel CFRAC (${numWorkers} Workers, Fast 2LP+52b Chunks): k=[${activeKsStr}], Shared Union QR-FB=${activeFb.primes.length}, L_max=${activeFb.largePrimeBound}.`);
       } else if (isChronos) {
         setGf2Stats({
           collected: 0,
@@ -804,7 +902,7 @@ const App: React.FC = () => {
           matrixSolves: 0,
           lastSource: useSiqsUnified
             ? 'Unified GF(2) (SIQS + CFRAC)'
-            : 'Parallel Montgomery REDC ECM + p±1',
+            : 'Parallel Zeta-Seeded REDC ECM + p±1',
           partialCount: 0,
           lpCollisions: 0,
           krylovSteps: 0,
@@ -812,9 +910,11 @@ const App: React.FC = () => {
         });
         addLog(
           useSiqsUnified
-            ? `>> Chronos v4 Unified Race: ${ecmWorkerCount} REDC ECM/p±1 + 1 CFRAC + ${totalSiqsWorkers} SIQS v4 (1LP+2LP, k=${optK}) | Shared GF(2) QR-FB=${activeFb.primes.length}.`
-            : `>> Chronos v4 Unified Race (>220b): ${numWorkers} Parallel Montgomery REDC ECM + p−1/p+1 Workers Active.`
+            ? `>> Chronos v4 Unified Race: ${ecmWorkerCount} Zeta REDC ECM/p±1 + 1 CFRAC + ${totalSiqsWorkers} SIQS v4 (1LP+2LP, k=${optK}) | Shared GF(2) QR-FB=${activeFb.primes.length}.`
+            : `>> Chronos v4 Unified Race (>220b): ${numWorkers} Parallel Zeta-Seeded Montgomery REDC ECM + p−1/p+1 Workers Active.`
         );
+      } else if (isZeta) {
+        addLog(`>> Zeta 160d Worker Active (48 Verified Riemann Zeros + Batch-GCD + Hart 4kN + REDC ECM B2).`);
       }
 
       const finishUnifiedSuccess = (
@@ -865,8 +965,22 @@ const App: React.FC = () => {
         const { type, steps, total, factor, message, nBits, round, features, attempts, curveAdds, modMuls, curveInfo, duration, workerId = currentWorkerId } = e.data;
         
         // Chronos v4 Unified Race events
-        if (type === 'chronos_suyama_stage') {
+        if (type === 'chronos_redc_benchmark') {
+          setRedcSpeedupInfo({
+            active: Boolean(e.data.active),
+            backend: e.data.backend,
+            nBits: e.data.nBits,
+            speedupPct: e.data.speedupPct,
+            redcNsPerMul: e.data.redcNsPerMul,
+            naiveNsPerMul: e.data.naiveNsPerMul,
+            source: e.data.source || 'web-worker',
+            opsPerSec: e.data.opsPerSec
+          });
+        } else if (type === 'chronos_suyama_stage') {
           workerOpsMap[workerId] += 600;
+          const phaseLabel = e.data.stagePhase === 'stage2-b2'
+            ? `B2 ${e.data.b2ProgressPct ?? 0}% (${e.data.curveFamily === 'montgomery' ? 'Mont' : 'Suy'})`
+            : (e.data.sigma ? String(e.data.sigma) : `B1=${Math.round(e.data.b1Bound / 1000)}k`);
           setWorkerThreadsStats(prev => {
             const next = [...prev];
             if (next[workerId]) {
@@ -874,7 +988,7 @@ const App: React.FC = () => {
                 ...next[workerId],
                 role: 'ecm',
                 curves: e.data.curveIndex,
-                stage: e.data.sigma ? String(e.data.sigma) : `Suyama B1=${Math.round(e.data.b1Bound / 1000)}k`,
+                stage: phaseLabel,
                 active: true
               };
             }
@@ -887,7 +1001,14 @@ const App: React.FC = () => {
             sigma: e.data.sigma,
             b1Bound: e.data.b1Bound,
             b2Bound: e.data.b2Bound,
-            torsionCertified: e.data.torsionCertified
+            torsionCertified: e.data.torsionCertified,
+            stagePhase: e.data.stagePhase,
+            curveFamily: e.data.curveFamily,
+            autoSwitchReason: e.data.autoSwitchReason,
+            b2ProgressPct: e.data.b2ProgressPct,
+            b2GiantStepsDone: e.data.b2GiantStepsDone,
+            b2GiantStepsTotal: e.data.b2GiantStepsTotal,
+            dStep: e.data.dStep
           });
           setCpuUsage(Math.min(99, 70 + numWorkers * 3));
         } else if (type === 'chronos_relations_batch') {
@@ -938,7 +1059,10 @@ const App: React.FC = () => {
               if (collected >= targetRelations && (collected - lastMatrixSolveLen >= solveDelta || matrixSolves === 0)) {
                 lastMatrixSolveLen = collected;
                 matrixSolves++;
-                const bwRes = solveBlockWiedemann(nBig, activeFb.primes, lpPool.getFullRelations());
+                const bwRes = solveBlockWiedemann(nBig, activeFb.primes, lpPool.getFullRelations(), lpPool.getRedcCtx());
+                if (bwRes.redcBenchmark) {
+                  setRedcSpeedupInfo(bwRes.redcBenchmark);
+                }
                 krylovOpsAccum += Math.max(64, (bwRes.krylovSteps || 1) * 64);
                 setGf2Stats(prev => ({
                   ...prev,
@@ -1006,27 +1130,33 @@ const App: React.FC = () => {
             }
           }
         } else if (type === 'cfrac_progress') {
-          workerOpsMap[currentWorkerId] = Math.max(workerOpsMap[currentWorkerId], (e.data.steps ?? 0) * 4);
+          const workerSteps = e.data.steps ?? 0;
+          const workerK = e.data.kMultiplier ?? workerCfracKMap[currentWorkerId] ?? activeCfracK;
+          workerOpsMap[currentWorkerId] = Math.max(workerOpsMap[currentWorkerId], workerSteps * 4);
           setCpuUsage(Math.min(96, 40 + Math.round(((lpPool.fullCount + 1) / Math.max(1, targetRelations)) * 55)));
           setCfracInfo(prev => ({
-            kMultiplier: e.data.kMultiplier ?? activeCfracK,
-            steps: e.data.steps ?? prev?.steps ?? 0,
+            kMultiplier: workerK,
+            steps: workerOpsMap.reduce((acc, v) => acc + Math.floor(v / 4), 0),
             fbSize: activeFb.primes.length,
             targetRelations,
             convergentsSample: e.data.convergentsSample ?? prev?.convergentsSample ?? [],
             smoothRelations: lpPool.fullCount,
             partialRelations: lpPool.partialCount,
             lpCollisions: lpPool.collisionsCount,
-            statusLabel: `نشر √(${e.data.kMultiplier ?? activeCfracK}N): الخطوة ${(e.data.steps ?? 0).toLocaleString()}`
+            statusLabel: numWorkers > 1 && isCfrac
+              ? `نشر متوازٍ (${numWorkers} خيوط · k=${workerK})`
+              : `نشر √(${workerK}N): الخطوة ${workerSteps.toLocaleString()}`
           }));
         } else if (type === 'cfrac_relations_batch') {
           const batch: SmoothRelation[] = e.data.relations || [];
+          const workerK = e.data.kMultiplier ?? workerCfracKMap[currentWorkerId] ?? activeCfracK;
           workerOpsMap[currentWorkerId] = Math.max(workerOpsMap[currentWorkerId], (e.data.steps ?? 0) * 4);
-          if (e.data.targetN === N && batch.length > 0 && e.data.kMultiplier === activeCfracK) {
+          if (e.data.targetN === N && batch.length > 0 && (isCfrac || workerK === activeCfracK)) {
             const { addedFull, addedPartial, newCollisions } = lpPool.ingestBatch(batch);
             cfracRelCount += addedFull + newCollisions;
             const collected = lpPool.fullCount;
             const elapsedSecNow = Math.max(0.05, (Date.now() - runStartedAt) / 1000);
+            const totalCfracStepsNow = workerOpsMap.reduce((acc, v) => acc + Math.floor(v / 4), 0);
 
             setWorkerThreadsStats(prev => {
               const next = [...prev];
@@ -1035,7 +1165,7 @@ const App: React.FC = () => {
                   ...next[currentWorkerId],
                   polys: e.data.steps ?? 0,
                   relations: (next[currentWorkerId].relations || 0) + addedFull + addedPartial,
-                  stage: `CFRAC k=${activeCfracK} → GF(2)`,
+                  stage: `CFRAC k=${workerK} → GF(2)`,
                   active: true
                 };
               }
@@ -1043,15 +1173,17 @@ const App: React.FC = () => {
             });
 
             setCfracInfo({
-              kMultiplier: activeCfracK,
-              steps: e.data.steps ?? 0,
+              kMultiplier: workerK,
+              steps: totalCfracStepsNow,
               fbSize: activeFb.primes.length,
               targetRelations,
               convergentsSample: e.data.convergentsSample ?? [],
               smoothRelations: collected,
               partialRelations: lpPool.partialCount,
               lpCollisions: lpPool.collisionsCount,
-              statusLabel: collected >= targetRelations ? 'حل مصفوفة GF(2) Block Wiedemann...' : `تجميع علاقات CFRAC (k=${activeCfracK})`
+              statusLabel: collected >= targetRelations
+                ? 'حل مصفوفة GF(2) Block Wiedemann...'
+                : (numWorkers > 1 && isCfrac ? `تجميع متوازٍ (${numWorkers} خيوط → ${collected}/${targetRelations})` : `تجميع علاقات CFRAC (k=${workerK})`)
             });
 
             setGf2Stats(prev => ({
@@ -1063,16 +1195,20 @@ const App: React.FC = () => {
               partialCount: lpPool.partialCount,
               lpCollisions: lpPool.collisionsCount,
               relationsPerSec: collected / elapsedSecNow,
-              polysProcessed: (e.data.steps ?? 0) + workerPolysMap.reduce((a, b) => a + b, 0),
+              polysProcessed: totalCfracStepsNow + workerPolysMap.reduce((a, b) => a + b, 0),
               lastSource: isChronos && siqsRelCount > 0
                 ? `Unified GF(2): SIQS(${siqsRelCount}) + CFRAC(${cfracRelCount})`
-                : `CFRAC k=${activeCfracK} (${collected}/${targetRelations})`
+                : `Parallel CFRAC ×${numWorkers} (${collected}/${targetRelations})`
             }));
 
-            if (collected >= targetRelations && (collected - lastMatrixSolveLen >= 4 || matrixSolves === 0)) {
+            const solveDeltaCfrac = nBitsVal >= 120 ? 10 : 4;
+            if (collected >= targetRelations && (collected - lastMatrixSolveLen >= solveDeltaCfrac || matrixSolves === 0)) {
               lastMatrixSolveLen = collected;
               matrixSolves++;
-              const bwRes = solveBlockWiedemann(nBig, activeFb.primes, lpPool.getFullRelations());
+              const bwRes = solveBlockWiedemann(nBig, activeFb.primes, lpPool.getFullRelations(), lpPool.getRedcCtx());
+              if (bwRes.redcBenchmark) {
+                setRedcSpeedupInfo(bwRes.redcBenchmark);
+              }
               krylovOpsAccum += Math.max(64, (bwRes.krylovSteps || 1) * 64);
               setGf2Stats(prev => ({
                 ...prev,
@@ -1093,7 +1229,7 @@ const App: React.FC = () => {
                   const finalOps = getCurrentTotalOps();
                   const winLabel = isChronos && siqsRelCount > 0
                     ? `GF(2) الموحد (SIQS + CFRAC · ${bwRes.methodUsed})`
-                    : `CFRAC (ك={activeCfracK}) · ${bwRes.methodUsed}`.replace('{activeCfracK}', String(activeCfracK));
+                    : `Parallel CFRAC ×${numWorkers} (k=${workerK}) · ${bwRes.methodUsed}`;
 
                   setBenchmarkHistory(prev => [
                     {
@@ -1102,7 +1238,7 @@ const App: React.FC = () => {
                       n: N,
                       durationMs,
                       relationsCollected: collected,
-                      polysProcessed: e.data.steps ?? 0,
+                      polysProcessed: totalCfracStepsNow,
                       relationsPerSec: Number((collected / (durationMs / 1000)).toFixed(2)),
                       lpCollisions: lpPool.collisionsCount,
                       solveMethod: winLabel,
@@ -1134,27 +1270,53 @@ const App: React.FC = () => {
             }
           }
         } else if (type === 'cfrac_period_exhausted') {
-          cfracMultIdx++;
-          if (cfracMultIdx < CFRAC_MULTIPLIERS.length && workersRef.current[currentWorkerId]) {
-            activeCfracK = CFRAC_MULTIPLIERS[cfracMultIdx];
-            if (!isChronos) {
-              activeFb = buildCfracFactorBase(BigInt(activeCfracK) * nBig);
-              lpPool = new SingleLargePrimePool(nBig, activeFb.primes);
-              targetRelations = activeFb.primes.length + 6;
-              lastMatrixSolveLen = 0;
+          if (isCfrac && cfracUnionFb) {
+            const nextIdx = nextCfracQueueIdx++;
+            if (nextIdx < CFRAC_MULTIPLIERS.length && workersRef.current[currentWorkerId]) {
+              const nextK = CFRAC_MULTIPLIERS[nextIdx];
+              workerCfracKMap[currentWorkerId] = nextK;
+              const sub = cfracUnionFb.getWorkerSubset(nextK);
+              addLog(`>> CFRAC W#${currentWorkerId + 1} switched to k=${nextK} (keeping ${lpPool.fullCount} shared relations).`);
+              workersRef.current[currentWorkerId].postMessage({
+                type: 'start',
+                n: N,
+                kMultiplier: nextK,
+                fbPrimes: sub.localPrimes,
+                fbGlobalIndices: sub.globalCols,
+                largePrimeBound: cfracUnionFb.largePrimeBound
+              });
+            } else {
+              exhaustedCfracWorkers++;
+              setWorkerThreadsStats(prev => {
+                const next = [...prev];
+                if (next[currentWorkerId]) {
+                  next[currentWorkerId] = { ...next[currentWorkerId], active: false, stage: 'Period Complete' };
+                }
+                return next;
+              });
+              if (exhaustedCfracWorkers >= numWorkers) {
+                setWorkerActive(false);
+                addLog(`❌ CFRAC exhausted all ${CFRAC_MULTIPLIERS.length} ranked multipliers without enough smooth relations.`);
+                setSimState(prev => ({ ...prev, status: 'failed' }));
+              }
             }
-            addLog(`>> CFRAC Period Reached: Switching to multiplier k=${activeCfracK} (shared QR-FB=${activeFb.primes.length}).`);
-            workersRef.current[currentWorkerId].postMessage({
-              type: 'start',
-              n: N,
-              kMultiplier: activeCfracK,
-              fbPrimes: activeFb.primes,
-              largePrimeBound: activeFb.largePrimeBound
-            });
-          } else if (!isChronos) {
-            setWorkerActive(false);
-            addLog(`❌ CFRAC exhausted multiplier schedule without enough smooth relations.`);
-            setSimState(prev => ({ ...prev, status: 'failed' }));
+          } else {
+            cfracMultIdx++;
+            if (cfracMultIdx < CFRAC_MULTIPLIERS.length && workersRef.current[currentWorkerId]) {
+              activeCfracK = CFRAC_MULTIPLIERS[cfracMultIdx];
+              addLog(`>> CFRAC Period Reached: Switching to multiplier k=${activeCfracK} (shared QR-FB=${activeFb.primes.length}).`);
+              workersRef.current[currentWorkerId].postMessage({
+                type: 'start',
+                n: N,
+                kMultiplier: activeCfracK,
+                fbPrimes: activeFb.primes,
+                largePrimeBound: activeFb.largePrimeBound
+              });
+            } else if (!isChronos) {
+              setWorkerActive(false);
+              addLog(`❌ CFRAC exhausted multiplier schedule without enough smooth relations.`);
+              setSimState(prev => ({ ...prev, status: 'failed' }));
+            }
           }
         } else if (type === 'chronos_progress') {
           workerOpsMap[workerId] = Math.max(workerOpsMap[workerId], e.data.steps || 0);
@@ -1231,13 +1393,16 @@ const App: React.FC = () => {
         
         // Fallback trace for other strategies
         else if (type === 'zeta_trace') {
-          setZetaTrace({
+          workerOpsMap[currentWorkerId] = Math.max(workerOpsMap[currentWorkerId], e.data.steps || 0);
+          setZetaTrace(prev => ({
             activeZeros: e.data.activeZeros,
             coherencePeak: e.data.coherencePeak,
             resonanceScore: e.data.resonanceScore,
-            steps: e.data.steps
-          });
-          setCpuUsage(85);
+            steps: e.data.steps,
+            precisionDigits: e.data.precisionDigits ?? prev?.precisionDigits,
+            seeds: e.data.seeds ?? prev?.seeds
+          }));
+          setCpuUsage(88);
         } else if (type === 'spectral_trace') {
           setHybridTrace({
             multiplier: e.data.multiplier,
@@ -1373,13 +1538,26 @@ const App: React.FC = () => {
             maxDepth: computedMax
           });
         } else if (wRole === 'cfrac') {
-          w.postMessage({
-            type: 'start',
-            n: N,
-            kMultiplier: activeCfracK,
-            fbPrimes: activeFb.primes,
-            largePrimeBound: activeFb.largePrimeBound
-          });
+          if (isCfrac && cfracUnionFb) {
+            const wK = workerCfracKMap[wId];
+            const sub = cfracUnionFb.getWorkerSubset(wK);
+            w.postMessage({
+              type: 'start',
+              n: N,
+              kMultiplier: wK,
+              fbPrimes: sub.localPrimes,
+              fbGlobalIndices: sub.globalCols,
+              largePrimeBound: cfracUnionFb.largePrimeBound
+            });
+          } else {
+            w.postMessage({
+              type: 'start',
+              n: N,
+              kMultiplier: activeCfracK,
+              fbPrimes: activeFb.primes,
+              largePrimeBound: activeFb.largePrimeBound
+            });
+          }
         } else if (isChronos) {
           const zfSeed = zfWorkerSeeds[wId]?.seedOffset ?? (wId * 250000);
           const mySiqsRank = wRole === 'siqs' ? siqsRankCounter++ : 0;
@@ -1398,7 +1576,9 @@ const App: React.FC = () => {
             fbLogs: activeFb.logs,
             largePrimeBound: activeFb.largePrimeBound,
             sieveMode,
-            sieveWeights: activeSieveWeights
+            sieveWeights: activeSieveWeights,
+            zetaSigmaSeed: zfWorkerSeeds[wId]?.zetaSigmaSeed ?? null,
+            zetaRhoSeed: zfWorkerSeeds[wId]?.zetaRhoSeed ?? null
           });
         } else if (activeStrat === 'hybrid' || activeStrat === 'zeta' || activeStrat === 'mmfr' || activeStrat === 'pollard' || activeStrat === 'ecm') {
           w.postMessage({ type: 'start', n: N });
@@ -1464,6 +1644,8 @@ const App: React.FC = () => {
       setHybridFingerprint(null);
       setHybridTrace(null);
       setHybridEcmStats(null);
+      setZetaTrace(null);
+      setBd500ZetaSeeds([]);
     } catch (e: any) {
       addLog(`Error generating key: ${e.message}`);
     }
@@ -1600,10 +1782,11 @@ const App: React.FC = () => {
               onSelectAlgorithm={(alg) => {
                 setPrimaryAlgorithm(alg);
                 if (alg === 'cfrac') setStrategy('cfrac');
+                else if (alg === 'zeta') setStrategy('zeta');
                 else if (alg === 'chronos-196') setStrategy('chronos-196');
               }}
               onLaunchChronos={(targetN, algOverride) => {
-                const chosen = algOverride || (primaryAlgorithm === 'cfrac' ? 'cfrac' : 'chronos-196');
+                const chosen = algOverride || (primaryAlgorithm === 'cfrac' ? 'cfrac' : (primaryAlgorithm === 'zeta' ? 'zeta' : 'chronos-196'));
                 setStrategy(chosen);
                 runAttack(targetN, chosen);
               }}
@@ -1616,8 +1799,10 @@ const App: React.FC = () => {
                       factor2: simState.solution.factor2,
                       allFactors: (simState.solution as any).allFactors,
                       method: strategy === 'cfrac'
-                        ? 'CFRAC (Continued Fractions + GF(2) Block Wiedemann)'
-                        : 'Chronos v4 (SIQS + 1LP + Block Wiedemann + ECM)',
+                        ? 'Parallel CFRAC (Fast 2LP + Shared GF(2) Block Wiedemann)'
+                        : (strategy === 'zeta'
+                          ? 'Zeta 48-Zeros Spectral Seeding (500d / 160d)'
+                          : 'Chronos v4 (SIQS + 1LP + Block Wiedemann + Zeta REDC ECM)'),
                       duration: simState.executionTime ? Math.round(simState.executionTime * 1000) : undefined
                     }
                   : null
@@ -1666,6 +1851,30 @@ const App: React.FC = () => {
                 isRunning={workerActive}
                 benchmarkHistory={benchmarkHistory}
                 onLaunchCfrac={() => runAttack(rsaKey?.n, 'cfrac')}
+                onStop={stopAttack}
+              />
+            )}
+
+            {primaryAlgorithm === 'zeta' && (
+              <ZetaFactorPanel
+                nValue={rsaKey?.n || ''}
+                zetaTrace={zetaTrace}
+                bd500Seeds={bd500ZetaSeeds}
+                isRunning={workerActive}
+                onGenerateSeeds500d={() => {
+                  const raw = (rsaKey?.n || '').replace(/[^0-9]/g, '');
+                  if (!raw) return;
+                  try {
+                    const seeds = generateUltraPreciseZetaSeeds(BigInt(raw), 6, 48);
+                    setBd500ZetaSeeds(seeds);
+                    if (seeds.length > 0) {
+                      addLog(`>> Generated ${seeds.length} Ultra-Precise BD500 Zeta Seeds (48 zeros): Peak#1 δ*=${seeds[0].delta500d.slice(0, 16)}, p_seed≈${seeds[0].candidatePSeed.slice(0, 18)}...`);
+                    }
+                  } catch (err: any) {
+                    addLog(`❌ Seed generation error: ${err?.message || err}`);
+                  }
+                }}
+                onLaunchZeta={() => runAttack(rsaKey?.n, 'zeta')}
                 onStop={stopAttack}
               />
             )}
@@ -1825,6 +2034,7 @@ const App: React.FC = () => {
               onUpdateUnifiedHints={setUnifiedHints}
               onLaunchUnifiedRace={(hintsArg) => runAttack(rsaKey?.n, 'chronos-196', hintsArg)}
               onStopUnifiedRace={stopAttack}
+              redcSpeedupInfo={redcSpeedupInfo}
             />
 
             <div className="h-64 rounded-xl overflow-hidden border border-[#E2DDD2] bg-white">

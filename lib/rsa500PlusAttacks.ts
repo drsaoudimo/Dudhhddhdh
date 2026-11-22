@@ -5,6 +5,11 @@ import {
   solveNarrowHighBitSieve,
   CoppersmithLllResult
 } from './coppersmithLllEngine';
+import {
+  computeUniversalExponentReport,
+  cacheFactorization,
+  getCachedFactorization
+} from './universalExponentEngine';
 
 const bitLen = (v: bigint): number => {
   const a = v < 0n ? -v : v;
@@ -888,6 +893,7 @@ export const generateWeakWienerRsa = (bits: number): { n: string; e: string; d: 
   let d = (1n << BigInt(dBitsTarget - 1)) | BigInt(Math.floor(Math.random() * 1000000) * 2 + 1);
   while (gcd(d, phi) !== 1n) d += 2n;
   const e = modInverse(d, phi);
+  cacheFactorization(n, p, q, [p, q], 'Wiener Weak-Key Generator');
   return {
     n: n.toString(),
     e: e.toString(),
@@ -920,6 +926,7 @@ export const generateBonehDurfeeRsa = (
   }
   while (gcd(d, phi) !== 1n) d += 2n;
   const e = modInverse(d, phi);
+  cacheFactorization(n, p, q, [p, q], 'Boneh-Durfee Generator');
   return {
     n: n.toString(),
     e: e.toString(),
@@ -1321,6 +1328,9 @@ export interface AutoExponentResult {
   dBits: number | null;
   factorMethod?: string;
   notesAr: string;
+  lambda?: string;
+  phi?: string;
+  d?: string;
 }
 
 const brentRhoQuick = (n: bigint, maxIters = 14000): bigint | null => {
@@ -1471,127 +1481,33 @@ export const autoComputePublicExponentForN = (
   hintP?: bigint,
   hintQ?: bigint
 ): AutoExponentResult => {
-  if (N < 15n) {
+  if (N < 2n) {
     return {
       e: '65537',
       source: 'standard-fallback',
       phiComputed: false,
       dBits: null,
-      notesAr: 'يرجى إدخال مودول N أكبر من أو يساوي 15.'
+      notesAr: 'يرجى إدخال مودول N أكبر من أو يساوي 2.'
     };
   }
 
-  let phi: bigint | null = null;
+  const rep = computeUniversalExponentReport(N, mode, deltaTarget, hintP, hintQ);
+  
   let source: AutoExponentResult['source'] = 'standard-fallback';
-  let factorMethod: string | undefined;
-  let isSemiprime = false;
-
-  if (hintP && hintQ && hintP > 1n && hintQ > 1n && hintP * hintQ === N) {
-    const res = computeEulerPhiExact(N, hintP);
-    phi = res.phi;
-    isSemiprime = res.isSemiprime;
-    source = 'known-pq';
-    factorMethod = 'معطى (p, q) للمودول';
-  } else if (hintP && hintP > 1n && hintP < N && N % hintP === 0n) {
-    const res = computeEulerPhiExact(N, hintP);
-    phi = res.phi;
-    isSemiprime = res.isSemiprime;
-    source = 'known-pq';
-    factorMethod = 'تلميح العامل p';
-  } else if (isProbablePrime(N, 12)) {
-    phi = N - 1n;
-    source = 'prime-n';
-    factorMethod = 'N عدد أولي';
-  } else {
-    const ext = fastExtractFactor(N);
-    if (ext) {
-      const res = computeEulerPhiExact(N, ext.p);
-      phi = res.phi;
-      isSemiprime = res.isSemiprime;
-      source = 'factored-fast';
-      factorMethod = ext.method;
-    }
-  }
-
-  if (phi === null || phi < 4n) {
-    return {
-      e: '65537',
-      source: 'standard-fallback',
-      phiComputed: false,
-      dBits: null,
-      notesAr:
-        'تم ضبط الأس العام القياسي e = 65537 تلقائياً؛ لأن حساب أس ضعيف e ≡ d⁻¹ (mod φ(N)) لمودول كبير غير محلّل يتطلب معرفة عوامل N أو إدخال تلميح p.'
-    };
-  }
-
-  if (mode === 'standard') {
-    let eCand = [65537n, 257n, 17n, 5n, 3n].find(c => c < phi! && gcd(c, phi!) === 1n);
-    if (!eCand) {
-      eCand = 3n;
-      while (eCand < phi && gcd(eCand, phi) !== 1n) eCand += 2n;
-    }
-    const d = modInverse(eCand, phi);
-    return {
-      e: eCand.toString(),
-      source,
-      phiComputed: true,
-      dBits: bitLen(d),
-      factorMethod,
-      notesAr: `تم حساب φ(N) عبر (${factorMethod}) واختيار الأس العام القياسي e = ${eCand.toString()} الموافق لـ gcd(e, φ(N)) = 1.`
-    };
-  }
-
-  // Wiener or Boneh-Durfee weak public exponent e = d^-1 mod φ(N)
-  const nBits = bitLen(N);
-  let targetDBits =
-    mode === 'wiener'
-      ? Math.max(3, Math.floor(nBits / 4) - 4)
-      : Math.max(4, Math.min(Math.floor(nBits * 0.282), Math.round(nBits * deltaTarget)));
-
-  // Cap target d below phi/4 for small moduli
-  const phiBits = bitLen(phi);
-  if (targetDBits >= phiBits - 1) targetDBits = Math.max(2, Math.floor(phiBits / 4));
-
-  let d = (1n << BigInt(Math.max(1, targetDBits - 1))) + 1n;
-  if (mode === 'boneh-durfee' && targetDBits > 8) {
-    for (let b = 4; b < targetDBits - 2; b += 7) {
-      if ((b % 14) === 4) d |= (1n << BigInt(b));
-    }
-  }
-  // Ensure strict Wiener condition 3d < N^(1/4) when in wiener mode
-  if (mode === 'wiener') {
-    const nFourth = bigIntSqrt(bigIntSqrt(N));
-    const maxWienerD = nFourth > 9n ? nFourth / 3n - 1n : 3n;
-    if (d > maxWienerD) d = maxWienerD % 2n === 0n ? maxWienerD - 1n : maxWienerD;
-    if (d < 3n) d = 3n;
-  }
-
-  let guard = 0;
-  while ((d >= phi || gcd(d, phi) !== 1n) && guard < 2000) {
-    d = d <= 5n ? d + 2n : d - 2n;
-    if (d < 3n) d = 3n;
-    guard++;
-  }
-  if (gcd(d, phi) !== 1n || d >= phi) {
-    d = 3n;
-    while (d < phi && gcd(d, phi) !== 1n) d += 2n;
-  }
-
-  const e = modInverse(d, phi);
-  const modeNote =
-    source === 'prime-n'
-      ? `تنبيه: العدد N أولي (φ(N)=N−1)، لذا تم حساب e ≡ d⁻¹ (mod N−1) حسابياً لكن هجوم فك شبه الأولي p×q لا ينطبق على عدد أولي.`
-      : isSemiprime
-      ? `تم استخلاص φ(N) عبر (${factorMethod}) وحساب الأس العام الضعيف e ≡ d⁻¹ (mod φ(N)) تلقائياً (|d| = ${bitLen(d)} بت).`
-      : `تم استخلاص φ(N) عبر (${factorMethod}) وحساب e ≡ d⁻¹ (mod φ(N)) تلقائياً (|d| = ${bitLen(d)} بت).`;
+  if (rep.status === 'prime') source = 'prime-n';
+  else if (rep.status === 'cached-factors') source = 'known-pq';
+  else if (rep.status === 'exact-factored' || rep.status === 'prime-power' || rep.status === 'even-split') source = 'factored-fast';
 
   return {
-    e: e.toString(),
+    e: rep.publicExponentE,
     source,
-    phiComputed: true,
-    dBits: bitLen(d),
-    factorMethod,
-    notesAr: modeNote
+    phiComputed: rep.isComplete,
+    dBits: rep.dBits,
+    factorMethod: rep.status,
+    notesAr: rep.explanationAr,
+    lambda: rep.lambdaN,
+    phi: rep.phiN,
+    d: rep.privateExponentD || undefined
   };
 };
 

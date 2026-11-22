@@ -1,4 +1,16 @@
 import { gcdBig, isProbablePrimeBig } from './mpqsGf2Solver';
+import {
+  bdDivInt,
+  bdExp,
+  bdFromNumber,
+  bdLn2,
+  bdLog2BigInt,
+  bdMul,
+  bdSub,
+  bdToNumber,
+  bdToString,
+  bdZero
+} from './lib/highPrecisionEngine';
 
 export interface SnfsPolySelection {
   degree: number;
@@ -7,6 +19,8 @@ export interface SnfsPolySelection {
   gCoeffs: string[];
   skew: string;
   alphaScoreEst: string;
+  skew500d?: string;
+  alphaScore500d?: string;
 }
 
 export interface SnfsAnalysis {
@@ -110,10 +124,18 @@ export const computeBaseMPoly = (
 
   const cTop = coeffs[degree] > 0n ? coeffs[degree] : 1n;
   const cZeroAbs = coeffs[0] < 0n ? -coeffs[0] : (coeffs[0] > 0n ? coeffs[0] : 1n);
-  const skewBits = Math.max(0, (cZeroAbs.toString(2).length - cTop.toString(2).length) / Math.max(1, degree));
-  const skewStr = Math.pow(2, Math.min(20, skewBits)).toFixed(2);
-  // Murphy alpha approximation from small prime root properties
-  const alphaScoreEst = (-1.15 - 0.12 * degree).toFixed(2);
+  const logRatioBD = bdSub(bdLog2BigInt(cZeroAbs), bdLog2BigInt(cTop));
+  const skewExpBD = logRatioBD > 0n ? bdDivInt(logRatioBD, Math.max(1, degree)) : bdZero();
+  const maxSkewExpBD = bdFromNumber(20);
+  const clampedSkewExpBD = skewExpBD > maxSkewExpBD ? maxSkewExpBD : skewExpBD;
+  const skewBD = bdExp(bdMul(clampedSkewExpBD, bdLn2()));
+  const skewStr = bdToNumber(skewBD).toFixed(2);
+  const skew500d = bdToString(skewBD, 500, false);
+
+  // Murphy alpha approximation in BD500 precision
+  const alphaBD = bdSub(bdFromNumber(-1.15), bdMul(bdFromNumber(0.12), bdFromNumber(degree)));
+  const alphaScoreEst = bdToNumber(alphaBD).toFixed(2);
+  const alphaScore500d = bdToString(alphaBD, 500, false);
 
   const polySelection: SnfsPolySelection = {
     degree,
@@ -121,7 +143,9 @@ export const computeBaseMPoly = (
     fCoeffs: coeffs.map(c => c.toString(10)),
     gCoeffs: [(-safeM).toString(10), '1'],
     skew: skewStr,
-    alphaScoreEst
+    alphaScoreEst,
+    skew500d,
+    alphaScore500d
   };
 
   const polyLines = [

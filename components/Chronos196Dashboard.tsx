@@ -9,6 +9,12 @@ import {
   V4_BENCHMARK_PRESETS
 } from '../v4FallbackOptimizer';
 import type { UnifiedRaceHints, UnifiedRaceSummary } from '../lib/chronosUnifiedRace';
+import {
+  EcmCurveFamily,
+  RedcBenchmarkResult,
+  selectAutoCurveFamily
+} from '../lib/montgomeryRedcKernel';
+import { surdFromSqrtN } from '../lib/highPrecisionEngine';
 import ZfSmartIntegrationDashboard from './ZfSmartIntegrationDashboard';
 
 interface Solution {
@@ -25,6 +31,13 @@ export interface ChronosSuyamaInfo {
   b1Bound: number;
   b2Bound: number;
   torsionCertified: boolean;
+  stagePhase?: 'stage1' | 'stage2-b2';
+  curveFamily?: EcmCurveFamily;
+  autoSwitchReason?: string;
+  b2ProgressPct?: number;
+  b2GiantStepsDone?: number;
+  b2GiantStepsTotal?: number;
+  dStep?: number;
 }
 
 export interface ChronosCfracInfo {
@@ -152,6 +165,7 @@ interface Chronos196DashboardProps {
   onUpdateUnifiedHints?: (hints: UnifiedRaceHints) => void;
   onLaunchUnifiedRace?: (hints?: UnifiedRaceHints) => void;
   onStopUnifiedRace?: () => void;
+  redcSpeedupInfo?: RedcBenchmarkResult | null;
 }
 
 export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
@@ -179,10 +193,13 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
   unifiedHints,
   onUpdateUnifiedHints,
   onLaunchUnifiedRace,
-  onStopUnifiedRace
+  onStopUnifiedRace,
+  redcSpeedupInfo = null
 }) => {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [copiedCado, setCopiedCado] = useState(false);
+  const [copiedSurd500, setCopiedSurd500] = useState(false);
+  const [showFull500Digits, setShowFull500Digits] = useState(false);
   const [showCadoConfig, setShowCadoConfig] = useState(false);
   const [showHintsDrawer, setShowHintsDrawer] = useState(false);
   const [showDeepTelemetry, setShowDeepTelemetry] = useState(false);
@@ -203,6 +220,15 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
       sqrtN = nBig > 0n ? bigIntSqrt(nBig) : 0n;
     }
   } catch {}
+
+  const sqrtSurd = useMemo(() => (nBig > 0n ? surdFromSqrtN(nBig) : null), [nValue]);
+  const effectiveB2Bound = suyamaInfo?.b2Bound ?? (bitLength > 500 ? 1500000 : bitLength > 220 ? 450000 : 120000);
+  const autoCurveDecision = useMemo(
+    () => selectAutoCurveFamily(bitLength, effectiveB2Bound),
+    [bitLength, effectiveB2Bound]
+  );
+  const activeCurveFamily = suyamaInfo?.curveFamily ?? autoCurveDecision.curveFamily;
+  const activeSwitchReason = suyamaInfo?.autoSwitchReason ?? autoCurveDecision.autoSwitchReason;
 
   const copyToClipboard = (text: string, idx: number) => {
     navigator.clipboard.writeText(text);
@@ -435,6 +461,80 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
           </div>
         </div>
 
+        {/* Embedded Montgomery-REDC Speedup Indicator Bar */}
+        {redcSpeedupInfo && (
+          <div className="bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono-tabular">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold text-[#1C1917]">
+                {isRTL ? 'تسريع Montgomery-REDC' : 'Montgomery-REDC'}
+              </span>
+              <span
+                dir="ltr"
+                className={`px-2 py-0.5 rounded-sm font-bold border ${
+                  redcSpeedupInfo.speedupPct >= 0
+                    ? 'bg-[#14532D]/10 text-[#14532D] border-[#14532D]/30'
+                    : 'bg-[#9A3412]/10 text-[#9A3412] border-[#9A3412]/30'
+                }`}
+              >
+                {redcSpeedupInfo.speedupPct >= 0 ? `+${redcSpeedupInfo.speedupPct}%` : `${redcSpeedupInfo.speedupPct}%`}
+              </span>
+              <span className="text-[#57534E]" dir="ltr">
+                {redcSpeedupInfo.backend} · {redcSpeedupInfo.source} · {redcSpeedupInfo.nBits}b
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-[#57534E]" dir="ltr">
+              <span>
+                REDC: <strong className="text-[#14532D]">{redcSpeedupInfo.redcNsPerMul} ns/mul</strong>
+              </span>
+              <span>
+                Naive: <strong className="text-[#1C1917]">{redcSpeedupInfo.naiveNsPerMul} ns/mul</strong>
+              </span>
+              <span>
+                <strong className="text-[#1E3A8A]">{(redcSpeedupInfo.opsPerSec / 1e6).toFixed(2)}M ops/s</strong>
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ECM Stage 1 + Stage 2 (B2) Auto Suyama <-> Montgomery Strip */}
+        {(suyamaInfo || bitLength > 220) && (
+          <div className="bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono-tabular">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-bold text-[#1C1917]">
+                  {isRTL ? 'ECM المرحلة 1 + 2 (B2)' : 'ECM Stage 1 + 2 (B2)'}
+                </span>
+                <span
+                  dir="ltr"
+                  className={`px-2 py-0.5 rounded-sm font-bold border ${
+                    activeCurveFamily === 'montgomery'
+                      ? 'bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/30'
+                      : 'bg-[#14532D]/10 text-[#14532D] border-[#14532D]/30'
+                  }`}
+                >
+                  {activeCurveFamily === 'montgomery' ? 'Montgomery Auto' : 'Suyama Auto'}
+                </span>
+                <span className="text-[11px] text-[#57534E]" dir="ltr">
+                  {activeSwitchReason}
+                </span>
+              </div>
+              <div className="text-[11px] text-[#1E3A8A]" dir="ltr">
+                {suyamaInfo?.stagePhase === 'stage2-b2'
+                  ? `B2 BSGS D=${suyamaInfo.dStep || 210}: ${suyamaInfo.b2GiantStepsDone ?? 0}/${suyamaInfo.b2GiantStepsTotal ?? 0} (${suyamaInfo.b2ProgressPct ?? 0}%)`
+                  : `Stage 1 (B1=${(suyamaInfo?.b1Bound || (bitLength > 500 ? 50000 : 15000)).toLocaleString()} · B2=${effectiveB2Bound.toLocaleString()})`}
+              </div>
+            </div>
+            <div className="h-1.5 bg-[#E2DDD2] rounded-sm overflow-hidden">
+              <div
+                className="h-full bg-[#14532D] transition-all duration-200"
+                style={{
+                  width: `${suyamaInfo?.stagePhase === 'stage2-b2' ? Math.min(100, suyamaInfo.b2ProgressPct ?? 0) : (isRunning ? 18 : 0)}%`
+                }}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Live Shared GF(2) Matrix Progress Bar (SIQS + CFRAC) */}
         {(isRunning || (sharedGf2 && sharedGf2.totalFullRelations > 0)) && sharedGf2 && (
           <div className="bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg p-3 space-y-2">
@@ -446,7 +546,7 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
                 SIQS: {sharedGf2.siqsRelations} · CFRAC: {sharedGf2.cfracRelations} · Total: {sharedGf2.totalFullRelations}/{sharedGf2.targetRelations} · 1LP: {sharedGf2.lpCollisions}
               </span>
             </div>
-            <div className="h-1.5 bg-[#E2DDD2] rounded-full overflow-hidden">
+            <div className="h-1.5 bg-[#E2DDD2] rounded-sm overflow-hidden">
               <div
                 className="h-full bg-[#1E3A8A] transition-all duration-200"
                 style={{
@@ -502,7 +602,7 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
         )}
 
         {/* Collapsible Secondary Engineering & Spectral Telemetry Toggle */}
-        <div className="pt-2 border-t border-[#E2DDD2] flex items-center justify-between">
+        <div className="pt-2 border-t border-[#E2DDD2] flex flex-wrap items-center justify-between gap-2">
           <button
             onClick={() => setShowDeepTelemetry(prev => !prev)}
             className="text-xs font-mono font-semibold text-[#1E3A8A] hover:underline"
@@ -511,12 +611,43 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
               ? (isRTL ? '▲ إخفاء التفاصيل الهندسية والرسوم الطيفية' : '▲ Masquer les détails d’ingénierie')
               : (isRTL ? '▼ معاينة التفاصيل الهندسية والرسوم الطيفية (للباحثين)' : '▼ Afficher les détails d’ingénierie et télémétrie')}
           </button>
-          {nBig > 0n && (
-            <span className="text-[11px] font-mono-tabular text-[#57534E]" dir="ltr">
-              ⌊√N⌋ ≈ {sqrtN.toString().slice(0, 18)}{sqrtN.toString().length > 18 ? '…' : ''}
-            </span>
+          {nBig > 0n && sqrtSurd && (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono-tabular text-[#57534E]" dir="ltr">
+              <span className="text-[#14532D] font-semibold" title={sqrtSurd.canonicalText}>
+                √N = {sqrtSurd.canonicalText}
+              </span>
+              <span className="text-[#A89F8D]">·</span>
+              <span>{sqrtSurd.decimalPreview}</span>
+              <button
+                onClick={() => setShowFull500Digits(prev => !prev)}
+                className="px-1.5 py-0.5 rounded-sm bg-[#F4F0E8] border border-[#E2DDD2] text-[#1E3A8A] hover:border-[#1E3A8A]"
+              >
+                {showFull500Digits ? (isRTL ? 'إخفاء 500d' : 'Masquer 500d') : '500d'}
+              </button>
+            </div>
           )}
         </div>
+
+        {showFull500Digits && sqrtSurd && (
+          <div className="bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg p-3 space-y-1.5" dir="ltr">
+            <div className="flex items-center justify-between text-[11px] font-mono text-[#57534E]">
+              <span>Exact Quadratic Surd Form: <strong className="text-[#14532D]">{sqrtSurd.canonicalText}</strong></span>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(sqrtSurd.decimal500);
+                  setCopiedSurd500(true);
+                  setTimeout(() => setCopiedSurd500(false), 1800);
+                }}
+                className="px-2 py-0.5 rounded-sm bg-white border border-[#E2DDD2] text-[#1E3A8A]"
+              >
+                {copiedSurd500 ? t.copiedNotice : 'Copy 500d'}
+              </button>
+            </div>
+            <div className="font-mono-tabular text-[11px] text-[#1C1917] break-all select-all bg-white p-2.5 rounded border border-[#E2DDD2]">
+              {sqrtSurd.decimal500}
+            </div>
+          </div>
+        )}
       </div>
 
       {showDeepTelemetry && (
@@ -529,10 +660,17 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
                   {nBig.toString()}
                 </span>
               </div>
-              <div className="bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2]">
-                <span className="text-[11px] text-[#57534E] block mb-1">{t.squareRootApprox} (⌊√N⌋):</span>
-                <span dir="ltr" className="font-mono-tabular text-xs text-[#1C1917] break-all select-all block">
-                  {sqrtN.toString()}
+              <div className="bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2] space-y-1.5">
+                <span className="text-[11px] text-[#57534E] block">
+                  {t.squareRootApprox} (√N · Exact Surd &amp; 500-Digit Expansion):
+                </span>
+                {sqrtSurd && (
+                  <div dir="ltr" className="font-mono-tabular text-xs text-[#14532D] font-bold break-all">
+                    Surd: {sqrtSurd.canonicalText}
+                  </div>
+                )}
+                <span dir="ltr" className="font-mono-tabular text-[11px] text-[#1C1917] break-all select-all block">
+                  {sqrtSurd ? sqrtSurd.decimal500 : sqrtN.toString()}
                 </span>
               </div>
             </div>
@@ -940,7 +1078,7 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
             </div>
           </div>
 
-          <div className="h-2 bg-[#F4F0E8] rounded-full overflow-hidden border border-[#E2DDD2]">
+          <div className="h-2 bg-[#F4F0E8] rounded-sm overflow-hidden border border-[#E2DDD2]">
             <div
               className="h-full bg-[#1E3A8A] transition-all duration-200"
               style={{
@@ -970,14 +1108,19 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
         </div>
       </div>
 
-      {/* Suyama Curves & M_dual Gram Matrix */}
+      {/* Suyama / Montgomery Curves Stage 1 + Stage 2 (B2) & M_dual Gram Matrix */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-white border border-[#E2DDD2] rounded-xl p-5 space-y-3">
           <div className="flex items-center justify-between border-b border-[#E2DDD2] pb-2.5">
-            <h3 className="text-sm font-bold text-[#1C1917]">{t.suyamaSectionTitle}</h3>
+            <div>
+              <h3 className="text-sm font-bold text-[#1C1917]">{t.suyamaSectionTitle}</h3>
+              <p className="text-[11px] font-mono text-[#57534E]" dir="ltr">
+                {activeCurveFamily.toUpperCase()} · {activeSwitchReason}
+              </p>
+            </div>
             <span className="text-xs font-mono-tabular text-[#14532D] font-bold">{totalCurves} curves</span>
           </div>
-          <div className="grid grid-cols-3 gap-2 text-xs font-mono-tabular" dir="ltr">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono-tabular" dir="ltr">
             <div className="bg-[#FBF9F5] p-3 rounded border border-[#E2DDD2]">
               <div className="text-[10px] text-[#57534E]">Active Curve</div>
               <div className="font-bold text-[#1E3A8A]">#{suyamaInfo?.curveIndex || totalCurves || 1}</div>
@@ -988,7 +1131,27 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
             </div>
             <div className="bg-[#FBF9F5] p-3 rounded border border-[#E2DDD2]">
               <div className="text-[10px] text-[#57534E]">B2 Bound</div>
-              <div className="font-bold text-[#9A3412]">{(suyamaInfo?.b2Bound || 300000).toLocaleString()}</div>
+              <div className="font-bold text-[#9A3412]">{effectiveB2Bound.toLocaleString()}</div>
+            </div>
+            <div className="bg-[#FBF9F5] p-3 rounded border border-[#E2DDD2]">
+              <div className="text-[10px] text-[#57534E]">Phase (D={suyamaInfo?.dStep || 210})</div>
+              <div className="font-bold text-[#1C1917]">
+                {suyamaInfo?.stagePhase === 'stage2-b2' ? `Stage 2 (${suyamaInfo.b2ProgressPct ?? 0}%)` : 'Stage 1'}
+              </div>
+            </div>
+          </div>
+          <div className="space-y-1" dir="ltr">
+            <div className="flex justify-between text-[10px] font-mono text-[#57534E]">
+              <span>Stage 2 (B2) BSGS Progress</span>
+              <span>
+                {suyamaInfo?.b2GiantStepsDone ?? 0} / {suyamaInfo?.b2GiantStepsTotal ?? 0} giant steps
+              </span>
+            </div>
+            <div className="h-1.5 bg-[#F4F0E8] rounded-sm overflow-hidden border border-[#E2DDD2]">
+              <div
+                className="h-full bg-[#14532D] transition-all duration-200"
+                style={{ width: `${Math.min(100, suyamaInfo?.b2ProgressPct ?? 0)}%` }}
+              />
             </div>
           </div>
         </div>

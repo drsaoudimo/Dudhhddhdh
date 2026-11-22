@@ -1,3 +1,21 @@
+import {
+  benchmarkRedcVsNaive,
+  createMontgomeryRedcCtx,
+  MontgomeryRedcCtx,
+  RedcBenchmarkResult
+} from './lib/montgomeryRedcKernel';
+import {
+  BD500,
+  bdAdd,
+  bdDivInt,
+  bdLn2,
+  bdLnBigInt,
+  bdMul,
+  bdMulInt,
+  bdToNumber,
+  bdZero
+} from './lib/highPrecisionEngine';
+
 export interface SmoothRelation {
   xVal: string;
   qVal?: string;
@@ -24,6 +42,14 @@ export interface SparseSolveResult {
   krylovSteps: number;
   coreRows: number;
   coreCols: number;
+  redcBenchmark?: RedcBenchmarkResult;
+  dynamicScaling?: {
+    nBits: number;
+    scaleFactor: number;
+    blockSize: number;
+    scaledRows: number;
+    scaledCols: number;
+  };
 }
 
 export const gcdBig = (a: bigint, b: bigint): bigint => {
@@ -135,56 +161,91 @@ const KS_MULTIPLIERS = [
 ];
 const KS_ODD_PRIMES = [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97];
 
-/**
- * Knuth-Schroeppel Multiplier Selection:
- * Finds square-free k in [1..73] maximizing small-prime quadratic residues for k*N
- * so k*N ≡ 1 (mod 8) and small primes divide Q(x) more frequently (~2-2.5 extra bits of smoothness).
- */
-export const selectKnuthSchroeppelMultiplier = (
-  N: bigint
-): { k: number; directFactor?: bigint } => {
-  if (N < 16n) return { k: 1 };
-  let bestK = 1;
-  let bestScore = -1e9;
+let cachedKsPrimeContribs: BD500[] | null = null;
+const getKsPrimeContribsBD = (): BD500[] => {
+  if (cachedKsPrimeContribs) return cachedKsPrimeContribs;
+  cachedKsPrimeContribs = KS_ODD_PRIMES.map(p => bdDivInt(bdLnBigInt(BigInt(p)), p - 1));
+  return cachedKsPrimeContribs;
+};
+
+const cachedKsMultiplierPenalty = new Map<number, BD500>();
+const getKsMultiplierPenaltyBD = (k: number): BD500 => {
+  let v = cachedKsMultiplierPenalty.get(k);
+  if (v !== undefined) return v;
+  v = k <= 1 ? bdZero() : -(bdLnBigInt(BigInt(k)) >> 1n);
+  cachedKsMultiplierPenalty.set(k, v);
+  return v;
+};
+
+export const selectRankedKnuthSchroeppelMultipliers = (
+  N: bigint,
+  count: number = 8
+): { ranked: number[]; directFactor?: bigint; topScore500d?: number } => {
+  if (N < 16n) return { ranked: [1] };
+  const scored: Array<{ k: number; scoreBD: BD500 }> = [];
+  const ln2BD = bdLn2();
+  const twoLn2BD = ln2BD << 1n;
+  const halfLn2BD = ln2BD >> 1n;
+  const primeContribs = getKsPrimeContribsBD();
+  void bdMul;
+  void bdMulInt;
 
   for (let i = 0; i < KS_MULTIPLIERS.length; i++) {
     const k = KS_MULTIPLIERS[i];
     if (k > 1) {
       const g = gcdBig(BigInt(k), N);
       if (g > 1n && g < N) {
-        return { k, directFactor: g };
+        return { ranked: [k], directFactor: g };
       }
     }
 
     const kN = BigInt(k) * N;
-    let score = -0.5 * Math.log(k);
+    let scoreBD = getKsMultiplierPenaltyBD(k);
     const mod8 = Number(kN & 7n);
-    if (mod8 === 1) score += 2.0 * Math.LN2;
-    else if (mod8 === 5) score += Math.LN2;
-    else if (mod8 === 3 || mod8 === 7) score += 0.5 * Math.LN2;
+    if (mod8 === 1) scoreBD = bdAdd(scoreBD, twoLn2BD);
+    else if (mod8 === 5) scoreBD = bdAdd(scoreBD, ln2BD);
+    else if (mod8 === 3 || mod8 === 7) scoreBD = bdAdd(scoreBD, halfLn2BD);
 
     for (let j = 0; j < KS_ODD_PRIMES.length; j++) {
       const p = KS_ODD_PRIMES[j];
-      const contrib = Math.log(p) / (p - 1);
+      const contribBD = primeContribs[j];
       if (k % p === 0) {
-        score += contrib;
+        scoreBD = bdAdd(scoreBD, contribBD);
       } else {
         const knModP = Number(kN % BigInt(p));
         if (knModP === 0) {
-          score += contrib;
+          scoreBD = bdAdd(scoreBD, contribBD);
         } else if (modPowNum(knModP, (p - 1) >> 1, p) === 1) {
-          score += 2.0 * contrib;
+          scoreBD = bdAdd(scoreBD, contribBD << 1n);
         }
       }
     }
 
-    if (score > bestScore) {
-      bestScore = score;
-      bestK = k;
-    }
+    scored.push({ k, scoreBD });
   }
 
-  return { k: bestK };
+  scored.sort((a, b) => (b.scoreBD > a.scoreBD ? 1 : b.scoreBD < a.scoreBD ? -1 : 0));
+  const picked = scored.slice(0, Math.max(1, count));
+  return {
+    ranked: picked.map(s => s.k),
+    topScore500d: picked[0] ? bdToNumber(picked[0].scoreBD) : 0
+  };
+};
+
+/**
+ * Knuth-Schroeppel Multiplier Selection (500-digit BD500 scoring):
+ * Finds square-free k in [1..73] maximizing small-prime quadratic residues for k*N
+ * so k*N ≡ 1 (mod 8) and small primes divide Q(x) more frequently.
+ */
+export const selectKnuthSchroeppelMultiplier = (
+  N: bigint
+): { k: number; directFactor?: bigint; bestScore500d?: number } => {
+  const res = selectRankedKnuthSchroeppelMultipliers(N, 1);
+  return {
+    k: res.ranked[0] ?? 1,
+    directFactor: res.directFactor,
+    bestScore500d: res.topScore500d
+  };
 };
 
 /**
@@ -237,19 +298,20 @@ export const buildMpqsFactorBase = (N: bigint, overrideM?: bigint): FactorBaseDa
 };
 
 /**
- * CFRAC-tuned QR Factor Base: scales smoothly for both small numbers (16-48b) and medium/large semiprimes (64-160b).
+ * CFRAC-tuned QR Factor Base: scales smoothly for both small numbers and medium/large semiprimes (64-160b),
+ * and preserves small primes dividing multiplier k so residues Q_{i+1} divisible by k factor cleanly.
  */
-export const buildCfracFactorBase = (M: bigint): FactorBaseData => {
-  const bits = M.toString(2).length;
+export const buildCfracFactorBase = (M: bigint, baseN?: bigint): FactorBaseData => {
+  const bits = (baseN || M).toString(2).length;
   let targetSize = 55;
   if (bits <= 24) targetSize = 14;
   else if (bits <= 36) targetSize = 24;
   else if (bits <= 48) targetSize = 36;
-  else if (bits <= 64) targetSize = 58;
-  else if (bits <= 84) targetSize = 95;
-  else if (bits <= 104) targetSize = 135;
-  else if (bits <= 128) targetSize = 185;
-  else targetSize = 260;
+  else if (bits <= 64) targetSize = 56;
+  else if (bits <= 84) targetSize = 90;
+  else if (bits <= 104) targetSize = 130;
+  else if (bits <= 128) targetSize = 175;
+  else targetSize = 240;
 
   const primes: number[] = [2];
   const roots: number[] = [Number(M & 1n)];
@@ -263,11 +325,19 @@ export const buildCfracFactorBase = (M: bigint): FactorBaseData => {
         isComp[j] = 1;
       }
       const pBig = BigInt(p);
-      const nMod = Number(M % pBig);
-      if (nMod === 0) continue;
-      const leg = modPowNum(nMod, (p - 1) >> 1, p);
+      const mMod = Number(M % pBig);
+      if (mMod === 0) {
+        // Include prime p if it divides multiplier k rather than N
+        if (!baseN || Number(baseN % pBig) !== 0) {
+          primes.push(p);
+          roots.push(0);
+          logs.push(Math.max(1, Math.round(Math.log2(p))));
+        }
+        continue;
+      }
+      const leg = modPowNum(mMod, (p - 1) >> 1, p);
       if (leg === 1) {
-        const r = tonelliShanks(nMod, p);
+        const r = tonelliShanks(mMod, p);
         if (r > 0) {
           primes.push(p);
           roots.push(r);
@@ -278,15 +348,106 @@ export const buildCfracFactorBase = (M: bigint): FactorBaseData => {
   }
 
   const maxP = primes[primes.length - 1] || 2;
-  const largePrimeBound = Math.min(maxP * 48, maxP * maxP, 4000000);
+  const largePrimeBound = Math.min(maxP * 64, maxP * maxP, 4500000);
   return { primes, roots, logs, largePrimeBound };
 };
 
-// Normalize relation into sparse odd-parity column list + accumulated square factor
+export interface CfracSharedUnionFb {
+  sharedPrimes: number[];
+  largePrimeBound: number;
+  getWorkerSubset: (k: number) => { localPrimes: number[]; globalCols: number[] };
+}
+
+/**
+ * Shared Superset Factor Base for Parallel Multi-Worker CFRAC:
+ * Because A_i^2 === (-1)^(i+1) Q_{i+1} (mod N) holds for ALL multipliers k modulo the same N,
+ * every worker filters the shared prime bound by Legendre(kN, p) in {0, 1} (~50% fewer trial divisions)
+ * while emitting column indices into ONE unified GF(2) matrix & 1LP/2LP cycle pool.
+ */
+export const buildCfracSharedUnionFactorBase = (
+  N: bigint,
+  multipliers: number[]
+): CfracSharedUnionFb => {
+  const bits = N.toString(2).length;
+  let perWorkerQrTarget = 56;
+  if (bits <= 24) perWorkerQrTarget = 14;
+  else if (bits <= 36) perWorkerQrTarget = 22;
+  else if (bits <= 48) perWorkerQrTarget = 34;
+  else if (bits <= 64) perWorkerQrTarget = 52;
+  else if (bits <= 84) perWorkerQrTarget = 84;
+  else if (bits <= 104) perWorkerQrTarget = 120;
+  else if (bits <= 128) perWorkerQrTarget = 160;
+  else perWorkerQrTarget = 220;
+
+  // Approximate union size: ~1.85x single-k QR factor base so each multiplier has ~perWorkerQrTarget primes
+  const maxUnionPrimes = Math.max(24, Math.round(perWorkerQrTarget * (multipliers.length > 1 ? 1.85 : 1.0)));
+  const limit = 25000;
+  const isComp = new Uint8Array(limit + 1);
+  const sharedPrimes: number[] = [2];
+
+  const qrSets = new Map<number, { localPrimes: number[]; globalCols: number[] }>();
+  for (const k of multipliers) {
+    qrSets.set(k, { localPrimes: [2], globalCols: [0] });
+  }
+
+  for (let p = 3; p <= limit && sharedPrimes.length < maxUnionPrimes; p += 2) {
+    if (isComp[p]) continue;
+    for (let j = p * p; j <= limit; j += 2 * p) isComp[j] = 1;
+
+    const pBig = BigInt(p);
+    const nMod = Number(N % pBig);
+    if (nMod === 0) continue; // N factor handled by direct trial check
+
+    // Keep prime p in shared matrix if it is QR or divisor for any active multiplier
+    const matchingMultipliers: number[] = [];
+    for (const k of multipliers) {
+      const knMod = (Number(k % p) * nMod) % p;
+      if (knMod === 0 || modPowNum(knMod, (p - 1) >> 1, p) === 1) {
+        matchingMultipliers.push(k);
+      }
+    }
+
+    if (matchingMultipliers.length > 0) {
+      const globalCol = sharedPrimes.length;
+      sharedPrimes.push(p);
+      for (const k of matchingMultipliers) {
+        const entry = qrSets.get(k)!;
+        entry.localPrimes.push(p);
+        entry.globalCols.push(globalCol);
+      }
+    }
+  }
+
+  const maxP = sharedPrimes[sharedPrimes.length - 1] || 2;
+  const largePrimeBound = Math.min(maxP * 64, maxP * maxP, 4500000);
+
+  const getWorkerSubset = (k: number) => {
+    const existing = qrSets.get(k);
+    if (existing) return existing;
+    const localPrimes: number[] = [2];
+    const globalCols: number[] = [0];
+    for (let idx = 1; idx < sharedPrimes.length; idx++) {
+      const p = sharedPrimes[idx];
+      const knMod = Number((BigInt(k) * N) % BigInt(p));
+      if (knMod === 0 || modPowNum(knMod, (p - 1) >> 1, p) === 1) {
+        localPrimes.push(p);
+        globalCols.push(idx);
+      }
+    }
+    const computed = { localPrimes, globalCols };
+    qrSets.set(k, computed);
+    return computed;
+  };
+
+  return { sharedPrimes, largePrimeBound, getWorkerSubset };
+};
+
+// Normalize relation into sparse odd-parity column list + Montgomery-REDC accumulated square factor
 const normalizeRelationToSparse = (
   rel: SmoothRelation,
   fbPrimes: number[],
-  N: bigint
+  N: bigint,
+  montCtx: MontgomeryRedcCtx | null = null
 ): { xVal: bigint; signNeg: boolean; sparseCols: number[]; extraSquare: bigint } => {
   if (rel.sparseCols && rel.extraSquare !== undefined) {
     return {
@@ -298,6 +459,29 @@ const normalizeRelationToSparse = (
   }
   const exps = rel.exponents || [];
   const sparseCols: number[] = [];
+
+  if (montCtx) {
+    let extraM = montCtx.oneM;
+    for (let i = 0; i < exps.length && i < fbPrimes.length; i++) {
+      const e = exps[i];
+      if (e <= 0) continue;
+      if ((e & 1) === 1) sparseCols.push(i);
+      const half = e >> 1;
+      if (half === 1) {
+        extraM = montCtx.montMul(extraM, montCtx.toMont(BigInt(fbPrimes[i])));
+      } else if (half > 1) {
+        const pPowM = montCtx.montPow(montCtx.toMont(BigInt(fbPrimes[i])), BigInt(half));
+        extraM = montCtx.montMul(extraM, pPowM);
+      }
+    }
+    return {
+      xVal: BigInt(rel.xVal),
+      signNeg: rel.signNeg,
+      sparseCols,
+      extraSquare: montCtx.fromMont(extraM)
+    };
+  }
+
   let extraSquare = 1n;
   for (let i = 0; i < exps.length && i < fbPrimes.length; i++) {
     const e = exps[i];
@@ -321,10 +505,11 @@ const symDiffSortedCols = (
   a: number[],
   b: number[],
   fbPrimes: number[],
-  N: bigint
+  N: bigint,
+  montCtx: MontgomeryRedcCtx | null = null
 ): { cols: number[]; commonProduct: bigint } => {
   const out: number[] = [];
-  let commonProduct = 1n;
+  let commonProductM = montCtx ? montCtx.oneM : 1n;
   let i = 0;
   let j = 0;
   while (i < a.length && j < b.length) {
@@ -333,28 +518,33 @@ const symDiffSortedCols = (
     } else if (b[j] < a[i]) {
       out.push(b[j++]);
     } else {
-      commonProduct = (commonProduct * BigInt(fbPrimes[a[i]])) % N;
+      const pBig = BigInt(fbPrimes[a[i]]);
+      commonProductM = montCtx
+        ? montCtx.montMul(commonProductM, montCtx.toMont(pBig))
+        : (commonProductM * pBig) % N;
       i++;
       j++;
     }
   }
   while (i < a.length) out.push(a[i++]);
   while (j < b.length) out.push(b[j++]);
-  return { cols: out, commonProduct };
+  return { cols: out, commonProduct: montCtx ? montCtx.fromMont(commonProductM) : commonProductM };
 };
+void symDiffSortedCols;
 
 /**
- * Single & Double Large Prime (1LP + 2LP) Graph Cycle Pool:
+ * Single & Double Large Prime (1LP + 2LP) Graph Cycle Pool with Unified Montgomery-REDC Arithmetic:
  * - Full relations: inserted directly.
  * - 1LP relation (largePrime = q1): undirected edge ('1' <-> q1).
  * - 2LP relation (largePrime = q1, largePrime2 = q2): undirected edge (q1 <-> q2);
  *   when q1 === q2 it reduces directly into a full relation.
  * Any cycle discovered by Union-Find + BFS spanning tree path extraction merges into
- * an exact combined full congruence modulo N with zero modular inversion needed.
+ * an exact combined full congruence modulo N via Wasm Montgomery-REDC.
  */
 export class SingleLargePrimePool {
   private N: bigint;
   private fbPrimes: number[];
+  private montCtx: MontgomeryRedcCtx | null;
   private fullMap = new Map<string, SmoothRelation>();
   private seenPartials = new Set<string>();
   private ufParent = new Map<string, string>();
@@ -367,8 +557,17 @@ export class SingleLargePrimePool {
   constructor(N: bigint, fbPrimes: number[]) {
     this.N = N;
     this.fbPrimes = fbPrimes;
+    this.montCtx = N > 2n && (N & 1n) === 1n ? createMontgomeryRedcCtx(N) : null;
     this.ufParent.set('1', '1');
     this.treeAdj.set('1', []);
+  }
+
+  public getRedcCtx(): MontgomeryRedcCtx | null {
+    return this.montCtx;
+  }
+
+  public runRedcBenchmark(): RedcBenchmarkResult {
+    return benchmarkRedcVsNaive(this.N, 'gf2-solver', this.montCtx || undefined);
   }
 
   private findRoot(v: string): string {
@@ -426,15 +625,21 @@ export class SingleLargePrimePool {
     cycleRels: SmoothRelation[],
     cycleVerts: string[]
   ): SmoothRelation {
-    let combinedX = 1n;
-    let combinedExtra = 1n;
+    const mc = this.montCtx;
+    let combinedXM = mc ? mc.oneM : 1n;
+    let combinedExtraM = mc ? mc.oneM : 1n;
     let signNeg = false;
     const colCounts = new Map<number, number>();
 
     for (let i = 0; i < cycleRels.length; i++) {
-      const norm = normalizeRelationToSparse(cycleRels[i], this.fbPrimes, this.N);
-      combinedX = (combinedX * norm.xVal) % this.N;
-      combinedExtra = (combinedExtra * norm.extraSquare) % this.N;
+      const norm = normalizeRelationToSparse(cycleRels[i], this.fbPrimes, this.N, mc);
+      if (mc) {
+        combinedXM = mc.montMul(combinedXM, mc.toMont(norm.xVal));
+        combinedExtraM = mc.montMul(combinedExtraM, mc.toMont(norm.extraSquare));
+      } else {
+        combinedXM = (combinedXM * norm.xVal) % this.N;
+        combinedExtraM = (combinedExtraM * norm.extraSquare) % this.N;
+      }
       if (norm.signNeg) signNeg = !signNeg;
       const cols = norm.sparseCols;
       for (let j = 0; j < cols.length; j++) {
@@ -447,7 +652,10 @@ export class SingleLargePrimePool {
     for (let i = 0; i < cycleVerts.length; i++) {
       const v = cycleVerts[i];
       if (v !== '1') {
-        combinedExtra = (combinedExtra * BigInt(v)) % this.N;
+        const vBig = BigInt(v);
+        combinedExtraM = mc
+          ? mc.montMul(combinedExtraM, mc.toMont(vBig))
+          : (combinedExtraM * vBig) % this.N;
       }
     }
 
@@ -457,11 +665,18 @@ export class SingleLargePrimePool {
       const half = cnt >> 1;
       if (half > 0) {
         const pBig = BigInt(this.fbPrimes[col]);
-        combinedExtra = (combinedExtra * modPowBig(pBig, BigInt(half), this.N)) % this.N;
+        if (mc) {
+          const pPowM = half === 1 ? mc.toMont(pBig) : mc.montPow(mc.toMont(pBig), BigInt(half));
+          combinedExtraM = mc.montMul(combinedExtraM, pPowM);
+        } else {
+          combinedExtraM = (combinedExtraM * modPowBig(pBig, BigInt(half), this.N)) % this.N;
+        }
       }
     }
     mergedCols.sort((a, b) => a - b);
 
+    const combinedX = mc ? mc.fromMont(combinedXM) : combinedXM;
+    const combinedExtra = mc ? mc.fromMont(combinedExtraM) : combinedExtraM;
     const combinedKey = `CYC:${combinedX.toString()}:${mergedCols.slice(0, 6).join(',')}:${this.collisionsCount}`;
     return {
       xVal: combinedX.toString(),
@@ -490,10 +705,13 @@ export class SingleLargePrimePool {
       const u = rel.largePrime;
       const v = rel.largePrime2 || '1';
 
-      // Direct square large prime in 2LP (q1 === q2) immediately yields a full relation
+      // Direct square large prime in 2LP (q1 === q2) immediately yields a full relation via REDC
       if (u === v) {
-        const norm = normalizeRelationToSparse(rel, this.fbPrimes, this.N);
-        const sqExtra = (norm.extraSquare * BigInt(u)) % this.N;
+        const mc = this.montCtx;
+        const norm = normalizeRelationToSparse(rel, this.fbPrimes, this.N, mc);
+        const sqExtra = mc
+          ? mc.fromMont(mc.montMul(mc.toMont(norm.extraSquare), mc.toMont(BigInt(u))))
+          : (norm.extraSquare * BigInt(u)) % this.N;
         const sqKey = `LP2SQ:${u}:${dedupKey}`;
         if (!this.fullMap.has(sqKey)) {
           this.fullMap.set(sqKey, {
@@ -551,23 +769,64 @@ export class SingleLargePrimePool {
   }
 }
 
-// Reconstruct X^2 === Y^2 (mod N) from a dependency subset of normalized relations
+// Reconstruct X^2 === Y^2 (mod N) via Wasm Montgomery-REDC slots
 const testDependencySubset = (
   subsetIndices: number[],
   normRels: Array<{ xVal: bigint; signNeg: boolean; sparseCols: number[]; extraSquare: bigint }>,
   fbPrimes: number[],
-  N: bigint
+  N: bigint,
+  montCtx: MontgomeryRedcCtx | null = null
 ): bigint | null => {
   if (subsetIndices.length === 0) return null;
-  let X = 1n;
-  let Y = 1n;
   let negParity = 0;
   const colCounts = new Int32Array(fbPrimes.length);
 
+  let XM = montCtx ? montCtx.oneM : 1n;
+  let YM = montCtx ? montCtx.oneM : 1n;
+
+  if (montCtx) {
+    montCtx.writeSlot(30, montCtx.oneM);
+    montCtx.writeSlot(31, montCtx.oneM);
+    for (let i = 0; i < subsetIndices.length; i++) {
+      const r = normRels[subsetIndices[i]];
+      montCtx.writeSlot(32, montCtx.toMont(r.xVal));
+      montCtx.montMulSlot(30, 32, 30);
+      if (r.extraSquare !== 1n) {
+        montCtx.writeSlot(32, montCtx.toMont(r.extraSquare));
+        montCtx.montMulSlot(31, 32, 31);
+      }
+      if (r.signNeg) negParity ^= 1;
+      const cols = r.sparseCols;
+      for (let c = 0; c < cols.length; c++) {
+        colCounts[cols[c]]++;
+      }
+    }
+    if (negParity !== 0) return null;
+    for (let j = 0; j < fbPrimes.length; j++) {
+      const cnt = colCounts[j];
+      if ((cnt & 1) !== 0) return null;
+      if (cnt > 0) {
+        const half = cnt >> 1;
+        const pM = montCtx.toMont(BigInt(fbPrimes[j]));
+        const pPowM = half === 1 ? pM : montCtx.montPow(pM, BigInt(half));
+        montCtx.writeSlot(32, pPowM);
+        montCtx.montMulSlot(31, 32, 31);
+      }
+    }
+    const X = montCtx.fromMont(montCtx.readSlot(30));
+    const Y = montCtx.fromMont(montCtx.readSlot(31));
+    const diff = X > Y ? X - Y : Y - X;
+    const g1 = gcdBig(diff, N);
+    if (g1 > 1n && g1 < N) return g1;
+    const g2 = gcdBig((X + Y) % N, N);
+    if (g2 > 1n && g2 < N) return g2;
+    return null;
+  }
+
   for (let i = 0; i < subsetIndices.length; i++) {
     const r = normRels[subsetIndices[i]];
-    X = (X * r.xVal) % N;
-    Y = (Y * r.extraSquare) % N;
+    XM = (XM * r.xVal) % N;
+    YM = (YM * r.extraSquare) % N;
     if (r.signNeg) negParity ^= 1;
     const cols = r.sparseCols;
     for (let c = 0; c < cols.length; c++) {
@@ -580,14 +839,14 @@ const testDependencySubset = (
     const cnt = colCounts[j];
     if ((cnt & 1) !== 0) return null;
     if (cnt > 0) {
-      Y = (Y * modPowBig(BigInt(fbPrimes[j]), BigInt(cnt >> 1), N)) % N;
+      YM = (YM * modPowBig(BigInt(fbPrimes[j]), BigInt(cnt >> 1), N)) % N;
     }
   }
 
-  const diff = X > Y ? X - Y : Y - X;
+  const diff = XM > YM ? XM - YM : YM - XM;
   const g1 = gcdBig(diff, N);
   if (g1 > 1n && g1 < N) return g1;
-  const g2 = gcdBig((X + Y) % N, N);
+  const g2 = gcdBig((XM + YM) % N, N);
   if (g2 > 1n && g2 < N) return g2;
   return null;
 };
@@ -633,23 +892,41 @@ const berlekampMasseyGF2 = (seq: Uint8Array): number[] => {
 };
 
 /**
- * Sparse Block Wiedemann GF(2) Solver:
+ * Sparse Block Wiedemann GF(2) Solver with Integrated Montgomery-REDC Engine:
  * 1. Sparse Singleton & Light-Pivot Pre-Filter (CSR representation, O(nnz) space).
  * 2. Exact Full-Rank Square Operator B = A * [I_k | R] where ker(B^T) === ker(A^T).
  * 3. 32-bit Parallel Krylov Sequence + Berlekamp-Massey null-space extraction.
- * 4. Compact core fallback if reduced sparse core has small rank (<= 220 rows).
+ * 4. Compact core fallback if reduced sparse core has small rank (<= 2400 rows).
+ * 5. Montgomery-REDC dependency product verification + live speedup benchmark.
  */
 export const solveBlockWiedemann = (
   N: bigint,
   factorBasePrimes: number[],
-  relations: SmoothRelation[]
+  relations: SmoothRelation[],
+  sharedMontCtx?: MontgomeryRedcCtx | null
 ): SparseSolveResult => {
+  const montCtx = sharedMontCtx !== undefined
+    ? sharedMontCtx
+    : (N > 2n && (N & 1n) === 1n ? createMontgomeryRedcCtx(N) : null);
+  const redcBenchmark = benchmarkRedcVsNaive(N, 'gf2-solver', montCtx || undefined);
+
+  const nBits = N.toString(2).length;
+  const isUltraLarge = nBits > 1000;
+  const scaleFactor = isUltraLarge ? Math.min(4.0, 1.0 + Number((BigInt(nBits) - 1000n) / 250n) * 0.35) : 1.0;
+  const blockSize = isUltraLarge ? Math.min(16, Math.max(2, Math.floor(nBits / 384))) : 2;
+  const maxElimRows = isUltraLarge ? Math.min(16384, Math.max(2400, Math.round(2400 * scaleFactor))) : 2400;
+  const dynScalingObj = isUltraLarge ? { nBits, scaleFactor, blockSize, scaledRows: 0, scaledCols: 0 } : undefined;
+  const makeRes = (res: any) => ({
+    ...res,
+    dynamicScaling: dynScalingObj ? { ...dynScalingObj, scaledRows: typeof mCore !== 'undefined' ? mCore : 0, scaledCols: typeof kCore !== 'undefined' ? kCore : 0 } : undefined
+  });
+
   const numColsBase = factorBasePrimes.length;
   if (relations.length <= numColsBase) {
-    return { factor: null, dependenciesTested: 0, methodUsed: 'none', krylovSteps: 0, coreRows: 0, coreCols: 0 };
+    return makeRes({ factor: null, dependenciesTested: 0, methodUsed: 'none', krylovSteps: 0, coreRows: 0, coreCols: 0, redcBenchmark });
   }
 
-  const normRels = relations.map(r => normalizeRelationToSparse(r, factorBasePrimes, N));
+  const normRels = relations.map(r => normalizeRelationToSparse(r, factorBasePrimes, N, montCtx));
   const numRows = normRels.length;
   const totalCols = numColsBase + 1; // col 0 is sign (-1), col c+1 is prime factorBasePrimes[c]
 
@@ -698,7 +975,7 @@ export const solveBlockWiedemann = (
   }
 
   if (activeRows.length === 0) {
-    return { factor: null, dependenciesTested, methodUsed: 'none', krylovSteps: 0, coreRows: 0, coreCols: 0 };
+    return makeRes({ factor: null, dependenciesTested, methodUsed: 'none', krylovSteps: 0, coreRows: 0, coreCols: 0, redcBenchmark });
   }
 
   // Re-index active columns cleanly so core matrix A is mCore x kCore (kCore < mCore)
@@ -711,16 +988,18 @@ export const solveBlockWiedemann = (
 
   const mCore = activeRows.length;
   const kCore = colMap.size;
+  const finalDynScaling = dynScalingObj ? { ...dynScalingObj, scaledRows: mCore, scaledCols: kCore } : undefined;
+
   if (mCore <= kCore) {
-    return { factor: null, dependenciesTested, methodUsed: 'none', krylovSteps: 0, coreRows: mCore, coreCols: kCore };
+    return makeRes({ factor: null, dependenciesTested, methodUsed: 'none', krylovSteps: 0, coreRows: mCore, coreCols: kCore, redcBenchmark });
   }
 
   const sparseColsA: number[][] = activeRows.map(row =>
     row.cols.map(c => colMap.get(c)!).sort((a, b) => a - b)
   );
 
-  // Fast bit-packed Uint32Array GF(2) forward elimination for matrices up to 2400 rows (196-bit takes ~15ms and tests ALL nullspace vectors)
-  if (mCore <= 2400) {
+  // Fast bit-packed Uint32Array GF(2) forward elimination for matrices up to maxElimRows (dynamically scaled for N > 1000b)
+  if (mCore <= maxElimRows) {
     const matWords = Math.ceil(kCore / 32);
     const histWords = Math.ceil(mCore / 32);
     const mat: Uint32Array[] = new Array(mCore);
@@ -792,7 +1071,7 @@ export const solveBlockWiedemann = (
       }
       if (subsetSet.size > 0) {
         dependenciesTested++;
-        const f = testDependencySubset(Array.from(subsetSet), normRels, factorBasePrimes, N);
+        const f = testDependencySubset(Array.from(subsetSet), normRels, factorBasePrimes, N, montCtx);
         if (f) {
           return {
             factor: f,
@@ -800,20 +1079,22 @@ export const solveBlockWiedemann = (
             methodUsed: 'markowitz-core',
             krylovSteps: mCore,
             coreRows: mCore,
-            coreCols: kCore
+            coreCols: kCore,
+            redcBenchmark
           };
         }
       }
     }
 
-    return {
+    return makeRes({
       factor: null,
       dependenciesTested,
       methodUsed: 'markowitz-core',
       krylovSteps: mCore,
       coreRows: mCore,
-      coreCols: kCore
-    };
+      coreCols: kCore,
+      redcBenchmark
+    });
   }
 
   // Sparse Block Wiedemann for giant cores (> 2400 rows)
@@ -959,16 +1240,17 @@ export const solveBlockWiedemann = (
         }
         if (subsetSet.size > 0) {
           dependenciesTested++;
-          const f = testDependencySubset(Array.from(subsetSet), normRels, factorBasePrimes, N);
+          const f = testDependencySubset(Array.from(subsetSet), normRels, factorBasePrimes, N, montCtx);
           if (f) {
-            return {
+            return makeRes({
               factor: f,
               dependenciesTested,
               methodUsed: 'block-wiedemann',
               krylovSteps: seqLen,
               coreRows: mCore,
-              coreCols: kCore
-            };
+              coreCols: kCore,
+              redcBenchmark
+            });
           }
         }
         break;
@@ -977,19 +1259,21 @@ export const solveBlockWiedemann = (
     }
   }
 
-  return {
+  return makeRes({
     factor: null,
     dependenciesTested,
     methodUsed: 'block-wiedemann',
     krylovSteps: seqLen,
     coreRows: mCore,
-    coreCols: kCore
-  };
+    coreCols: kCore,
+    redcBenchmark
+  });
 };
 
 // Preserve exported solveGf2Matrix alias routing directly to Block Wiedemann Sparse Engine
 export const solveGf2Matrix = (
   N: bigint,
   factorBasePrimes: number[],
-  relations: SmoothRelation[]
-): SparseSolveResult => solveBlockWiedemann(N, factorBasePrimes, relations);
+  relations: SmoothRelation[],
+  sharedMontCtx?: MontgomeryRedcCtx | null
+): SparseSolveResult => solveBlockWiedemann(N, factorBasePrimes, relations, sharedMontCtx);

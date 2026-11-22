@@ -500,13 +500,39 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
 
                 {autoExpNotice && (
                   <div
-                    className={`p-2.5 rounded border text-[11px] leading-relaxed ${
+                    className={`p-3 rounded-lg border text-xs leading-relaxed space-y-2 ${
                       autoExpNotice.phiComputed && autoExpNotice.source !== 'prime-n'
                         ? 'bg-[#14532D]/5 border-[#14532D]/25 text-[#14532D]'
                         : 'bg-[#F4F0E8] border-[#E2DDD2] text-[#57534E]'
                     }`}
                   >
-                    {autoExpNotice.notesAr}
+                    <div className="font-semibold text-[11px] flex items-center justify-between">
+                      <span>{autoExpNotice.phiComputed ? '✓ تم ضمان وحساب الأس العام بدقة رياضية' : 'ℹ الأس العام القياسي المضمون'}</span>
+                      {autoExpNotice.dBits && <span dir="ltr" className="font-mono-tabular font-bold">|d| = {autoExpNotice.dBits}b</span>}
+                    </div>
+                    {autoExpNotice.lambda && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono-tabular" dir="ltr">
+                        <div className="bg-white/80 p-2 rounded border border-[#E2DDD2]/60">
+                          <span className="text-[10px] text-[#57534E] block">الأس العام الأصغر λ(N) Carmichael</span>
+                          <span className="font-bold text-[#1E3A8A] break-all">{autoExpNotice.lambda.slice(0, 36)}{autoExpNotice.lambda.length > 36 ? '...' : ''}</span>
+                        </div>
+                        {autoExpNotice.phi && (
+                          <div className="bg-white/80 p-2 rounded border border-[#E2DDD2]/60">
+                            <span className="text-[10px] text-[#57534E] block">مؤشر أويلر φ(N) Euler Totient</span>
+                            <span className="font-bold text-[#1C1917] break-all">{autoExpNotice.phi.slice(0, 36)}{autoExpNotice.phi.length > 36 ? '...' : ''}</span>
+                          </div>
+                        )}
+                        {autoExpNotice.d && (
+                          <div className="sm:col-span-2 bg-white/80 p-2 rounded border border-[#E2DDD2]/60">
+                            <span className="text-[10px] text-[#57534E] block">الأس الخاص المحسوب d ≡ e⁻¹ (mod λ(N))</span>
+                            <span className="font-bold text-[#14532D] break-all">{autoExpNotice.d.slice(0, 48)}{autoExpNotice.d.length > 48 ? '...' : ''}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div className="text-[11px] leading-relaxed text-[#1C1917]">
+                      {autoExpNotice.notesAr}
+                    </div>
                   </div>
                 )}
               </div>

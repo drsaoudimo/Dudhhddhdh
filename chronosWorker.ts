@@ -1,4 +1,6 @@
-export const CHRONOS_WORKER_CODE = `
+import { getWorkerMontRedcCode } from './lib/montgomeryRedcKernel';
+
+export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
   const gcd = (a, b) => {
     let x = a < 0n ? -a : a;
     let y = b < 0n ? -b : b;
@@ -125,11 +127,20 @@ export const CHRONOS_WORKER_CODE = `
     67.079811, 69.546402, 72.067158, 75.704691, 77.144840
   ];
 
-  // Fast Pollard-Brent cycle finder
-  const runPollardBrent = (N, maxIterations = 30000, seedSkew = 0) => {
+  // Fast Pollard-Brent cycle finder (supports 500-digit Zeta spectral rhoSeed)
+  const runPollardBrent = (N, maxIterations = 30000, seedSkew = 0, zetaRhoSeedStr = null) => {
     if ((N & 1n) === 0n) return 2n;
     let y = BigInt((seedSkew * 17 + 2) % 100000) + 2n;
-    const c = BigInt((seedSkew * 31 + 1) % 10000) + 1n;
+    let c = BigInt((seedSkew * 31 + 1) % 10000) + 1n;
+    if (zetaRhoSeedStr) {
+      try {
+        const zr = BigInt(zetaRhoSeedStr);
+        if (N > 7n) {
+          y = ((zr + BigInt(seedSkew * 17)) % (N - 3n)) + 2n;
+          c = ((zr >> 5n) + BigInt(seedSkew * 31)) % (N - 2n) + 1n;
+        }
+      } catch {}
+    }
     const m = 128;
     let g = 1n, r = 1, q = 1n;
     let x = y, ys = y;
@@ -169,124 +180,8 @@ export const CHRONOS_WORKER_CODE = `
     return null;
   };
 
-  // Adaptive Montgomery REDC (<=576b) / V8 Native Mod (>576b) Arithmetic + 4-bit Window modPow
-  const createMontgomeryCtx = (N) => {
-    const bits = N.toString(2).length;
-    const useNative = bits > 576;
+  // Unified Montgomery-REDC Wasm + fallback context comes from getWorkerMontRedcCode() above
 
-    if (useNative) {
-      const oneM = 1n;
-      const twoM = 2n % N;
-      const toMont = (x) => ((x % N) + N) % N;
-      const fromMont = (xM) => xM;
-      const montMul = (a, b) => (a * b) % N;
-      const montAdd = (a, b) => {
-        const s = a + b;
-        return s >= N ? s - N : s;
-      };
-      const montSub = (a, b) => (a >= b ? a - b : a + N - b);
-      const montPow = (baseM, exp) => {
-        if (exp === 0n) return 1n;
-        if (exp === 1n) return baseM;
-        const eBits = exp.toString(2).length;
-        if (eBits < 64) {
-          let res = 1n;
-          let b = baseM;
-          let e = exp;
-          while (e > 0n) {
-            if (e & 1n) res = (res * b) % N;
-            e >>= 1n;
-            if (e > 0n) b = (b * b) % N;
-          }
-          return res;
-        }
-        // 4-bit fixed window exponentiation (~17% fewer muls on large p-1 blocks)
-        const tbl = new Array(16);
-        tbl[0] = 1n;
-        tbl[1] = baseM;
-        const b2 = (baseM * baseM) % N;
-        for (let t = 2; t < 16; t++) tbl[t] = (tbl[t - 1] * baseM) % N;
-        const hex = exp.toString(16);
-        let res = tbl[parseInt(hex[0], 16)];
-        for (let i = 1; i < hex.length; i++) {
-          res = (res * res) % N;
-          res = (res * res) % N;
-          res = (res * res) % N;
-          res = (res * res) % N;
-          const nib = parseInt(hex[i], 16);
-          if (nib !== 0) res = (res * tbl[nib]) % N;
-        }
-        void b2;
-        return res;
-      };
-      return { N, oneM, twoM, toMont, fromMont, montMul, montAdd, montSub, montPow };
-    }
-
-    const w = Math.ceil(bits / 64) * 64;
-    const wBig = BigInt(w);
-    const R = 1n << wBig;
-
-    // Hensel lifting for N^{-1} mod 2^w
-    let inv = 1n;
-    for (let step = 1; step < w; step <<= 1) {
-      inv = BigInt.asUintN(w, inv * (2n - N * inv));
-    }
-    const nPrime = BigInt.asUintN(w, R - inv); // -N^{-1} mod R
-
-    const redc = (T) => {
-      const m = BigInt.asUintN(w, BigInt.asUintN(w, T) * nPrime);
-      let t = (T + m * N) >> wBig;
-      if (t >= N) t -= N;
-      return t;
-    };
-
-    const oneM = R % N;
-    const twoM = (oneM + oneM) >= N ? (oneM + oneM - N) : (oneM + oneM);
-    const toMont = (x) => {
-      const xm = ((x % N) + N) % N;
-      return (xm << wBig) % N;
-    };
-    const fromMont = (xM) => redc(xM);
-    const montMul = (aM, bM) => redc(aM * bM);
-    const montAdd = (a, b) => {
-      const s = a + b;
-      return s >= N ? s - N : s;
-    };
-    const montSub = (a, b) => (a >= b ? a - b : a + N - b);
-
-    const montPow = (baseM, exp) => {
-      if (exp === 0n) return oneM;
-      if (exp === 1n) return baseM;
-      if (exp < (1n << 48n)) {
-        let res = oneM;
-        let b = baseM;
-        let e = exp;
-        while (e > 0n) {
-          if (e & 1n) res = redc(res * b);
-          e >>= 1n;
-          if (e > 0n) b = redc(b * b);
-        }
-        return res;
-      }
-      const tbl = new Array(16);
-      tbl[0] = oneM;
-      tbl[1] = baseM;
-      for (let t = 2; t < 16; t++) tbl[t] = redc(tbl[t - 1] * baseM);
-      const hex = exp.toString(16);
-      let res = tbl[parseInt(hex[0], 16)];
-      for (let i = 1; i < hex.length; i++) {
-        res = redc(res * res);
-        res = redc(res * res);
-        res = redc(res * res);
-        res = redc(res * res);
-        const nib = parseInt(hex[i], 16);
-        if (nib !== 0) res = redc(res * tbl[nib]);
-      }
-      return res;
-    };
-
-    return { N, oneM, twoM, toMont, fromMont, montMul, montAdd, montSub, montPow };
-  };
 
   // Pollard p-1 Batched Windowed Stage 1 + Incremental-Gap Stage 2
   const runMontgomeryPMinus1 = (ctx, b1, b2) => {
@@ -442,189 +337,8 @@ export const CHRONOS_WORKER_CODE = `
     return null;
   };
 
-  // Montgomery Curve Point Operations inside active arithmetic domain (zero string ops)
-  const addMontRedc = (ctx, x1, z1, x2, z2, x0, z0) => {
-    const { montMul, montAdd, montSub } = ctx;
-    const u = montMul(montSub(x1, z1), montAdd(x2, z2));
-    const v = montMul(montAdd(x1, z1), montSub(x2, z2));
-    const sumUV = montAdd(u, v);
-    const diffUV = montSub(u, v);
-    const x3 = montMul(z0, montMul(sumUV, sumUV));
-    const z3 = montMul(x0, montMul(diffUV, diffUV));
-    return [x3, z3];
-  };
+  // Unified Stage 1 + Stage 2 B2 (Suyama <-> Montgomery auto-switching) provided by runUnifiedEcmStage1And2
 
-  const doubleMontRedc = (ctx, x, z, a24M) => {
-    const { montMul, montAdd, montSub } = ctx;
-    const sum = montAdd(x, z);
-    const diffXZ = montSub(x, z);
-    const u = montMul(sum, sum);
-    const v = montMul(diffXZ, diffXZ);
-    const diff = montSub(u, v);
-    const x2 = montMul(u, v);
-    const z2 = montMul(diff, montAdd(v, montMul(a24M, diff)));
-    return [x2, z2];
-  };
-
-  // Zero-alloc integer bit-scan Montgomery ladder (no k.toString(2) and no per-bit array allocs)
-  const mulMontSmall = (ctx, k, bx, bz, a24M) => {
-    if (k === 0) return [ctx.oneM, 0n];
-    if (k === 1) return [bx, bz];
-    const { montMul, montAdd, montSub } = ctx;
-    let x0 = ctx.oneM, z0 = 0n;
-    let x1 = bx, z1 = bz;
-    const msb = 31 - Math.clz32(k);
-    for (let bit = msb; bit >= 0; bit--) {
-      const uA = montMul(montSub(x1, z1), montAdd(x0, z0));
-      const vA = montMul(montAdd(x1, z1), montSub(x0, z0));
-      const sumUV = montAdd(uA, vA);
-      const diffUV = montSub(uA, vA);
-      const ax = montMul(bz, montMul(sumUV, sumUV));
-      const az = montMul(bx, montMul(diffUV, diffUV));
-      if ((k >>> bit) & 1) {
-        const sumD = montAdd(x1, z1);
-        const difD = montSub(x1, z1);
-        const uD = montMul(sumD, sumD);
-        const vD = montMul(difD, difD);
-        const df = montSub(uD, vD);
-        x0 = ax;
-        z0 = az;
-        x1 = montMul(uD, vD);
-        z1 = montMul(df, montAdd(vD, montMul(a24M, df)));
-      } else {
-        const sumD = montAdd(x0, z0);
-        const difD = montSub(x0, z0);
-        const uD = montMul(sumD, sumD);
-        const vD = montMul(difD, difD);
-        const df = montSub(uD, vD);
-        x1 = ax;
-        z1 = az;
-        x0 = montMul(uD, vD);
-        z0 = montMul(df, montAdd(vD, montMul(a24M, df)));
-      }
-    }
-    return [x0, z0];
-  };
-
-  const getSuyamaCurveRedc = (ctx, sigma, N) => {
-    const u = (sigma * sigma - 5n + N) % N;
-    const v = (4n * sigma) % N;
-    const u3 = (((u * u) % N) * u) % N;
-    const v3 = (((v * v) % N) * v) % N;
-    const diff = (v - u + N) % N;
-    const diff3 = (((diff * diff) % N) * diff) % N;
-    const num = (diff3 * (3n * u + v)) % N;
-    const den4 = (16n * ((u3 * v) % N)) % N;
-
-    const g = gcd(den4, N);
-    if (g > 1n && g < N) return { factor: g };
-    if (g === N || g > 1n) return null;
-
-    const a24 = (num * modInverse(den4, N)) % N;
-    return {
-      a24M: ctx.toMont(a24),
-      x0M: ctx.toMont(u3),
-      z0M: ctx.toMont(v3)
-    };
-  };
-
-  // Montgomery Suyama ECM with Stage 1 + Fixed Batch-Normalized Stage 2 BSGS
-  const runChronosSuyamaEcm = (N, sigmaVal, b1, b2, stage1Only = false, sharedCtx = null) => {
-    const ctx = sharedCtx || createMontgomeryCtx(N);
-    const curve = getSuyamaCurveRedc(ctx, sigmaVal, N);
-    if (!curve) return null;
-    if (curve.factor) return { factor: curve.factor, stage: 'Curve Setup GCD' };
-
-    const { a24M, x0M, z0M } = curve;
-    const primesB1 = getPrimesUpTo(b1);
-    let curX = x0M, curZ = z0M;
-    let accumZ = ctx.oneM;
-
-    for (let i = 0; i < primesB1.length; i++) {
-      const p = primesB1[i];
-      let pwr = p;
-      while (pwr * p <= b1) pwr *= p;
-      const [nx, nz] = mulMontSmall(ctx, pwr, curX, curZ, a24M);
-      curX = nx; curZ = nz;
-      if (nz > 0n) accumZ = ctx.montMul(accumZ, nz);
-
-      if ((i & 511) === 511) {
-        const g = gcd(ctx.fromMont(accumZ), N);
-        if (g > 1n && g < N) return { factor: g, stage: 'ECM Stage 1' };
-        accumZ = ctx.oneM;
-      }
-    }
-
-    const gStage1 = gcd(ctx.fromMont(curZ), N);
-    if (gStage1 > 1n && gStage1 < N) return { factor: gStage1, stage: 'ECM Stage 1' };
-    const gAccum = gcd(ctx.fromMont(accumZ), N);
-    if (gAccum > 1n && gAccum < N) return { factor: gAccum, stage: 'ECM Stage 1' };
-
-    if (stage1Only || b2 <= b1) return null;
-
-    // Stage 2: BSGS over (B1, B2] with D = 210 and Montgomery batch inversion of baby-steps
-    const D = 210;
-    const coprimeD = [1, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103];
-    const bxArr = new Array(coprimeD.length);
-    const bzArr = new Array(coprimeD.length);
-    for (let idx = 0; idx < coprimeD.length; idx++) {
-      const [bx, bz] = mulMontSmall(ctx, coprimeD[idx], curX, curZ, a24M);
-      bxArr[idx] = bx;
-      bzArr[idx] = bz;
-    }
-
-    const prefix = new Array(coprimeD.length);
-    prefix[0] = bzArr[0];
-    for (let idx = 1; idx < coprimeD.length; idx++) {
-      prefix[idx] = ctx.montMul(prefix[idx - 1], bzArr[idx]);
-    }
-    const prodNorm = ctx.fromMont(prefix[coprimeD.length - 1]);
-    const gBatch = gcd(prodNorm, N);
-    if (gBatch > 1n && gBatch < N) return { factor: gBatch, stage: 'ECM Stage 2 (BabySetup GCD)' };
-    if (gBatch === N) return null;
-
-    let invAcc = ctx.toMont(modInverse(prodNorm, N));
-    for (let idx = coprimeD.length - 1; idx > 0; idx--) {
-      const zInv = ctx.montMul(invAcc, prefix[idx - 1]);
-      invAcc = ctx.montMul(invAcc, bzArr[idx]);
-      bxArr[idx] = ctx.montMul(bxArr[idx], zInv);
-    }
-    bxArr[0] = ctx.montMul(bxArr[0], invAcc);
-
-    const [dX, dZ] = mulMontSmall(ctx, D, curX, curZ, a24M);
-    const startM = Math.max(1, Math.floor((b1 - 105) / D));
-    const endM = Math.ceil((b2 + 105) / D);
-
-    let [prevGX, prevGZ] = mulMontSmall(ctx, startM - 1, dX, dZ, a24M);
-    let [giantX, giantZ] = mulMontSmall(ctx, startM, dX, dZ, a24M);
-    let stage2Accum = ctx.oneM;
-
-    for (let m = startM; m <= endM; m++) {
-      for (let idx = 0; idx < bxArr.length; idx++) {
-        const diff = ctx.montSub(giantX, ctx.montMul(giantZ, bxArr[idx]));
-        if (diff > 0n) stage2Accum = ctx.montMul(stage2Accum, diff);
-      }
-
-      if ((m & 31) === 31) {
-        const g2 = gcd(ctx.fromMont(stage2Accum), N);
-        if (g2 > 1n && g2 < N) return { factor: g2, stage: 'ECM Stage 2 (BSGS)' };
-        stage2Accum = ctx.oneM;
-      }
-
-      if (m < endM) {
-        const [ngx, ngz] = addMontRedc(ctx, giantX, giantZ, dX, dZ, prevGX, prevGZ);
-        prevGX = giantX;
-        prevGZ = giantZ;
-        giantX = ngx;
-        giantZ = ngz;
-      }
-    }
-
-    const gFinal = gcd(ctx.fromMont(stage2Accum), N);
-    if (gFinal > 1n && gFinal < N) return { factor: gFinal, stage: 'ECM Stage 2 (BSGS)' };
-
-    return null;
-  };
 
   const siqsCache = {
     key: '',
@@ -1281,30 +995,32 @@ export const CHRONOS_WORKER_CODE = `
     return null;
   };
 
+  const bigLn = (val) => {
+    if (val <= 1n) return 0;
+    const bits = val.toString(2).length;
+    if (bits <= 53) return Math.log(Number(val));
+    const shift = BigInt(bits - 53);
+    const topMantissa = Number(val >> shift);
+    return Math.log(topMantissa) + Number(shift) * Math.LN2;
+  };
+
   const computeMDualMatrix = (N) => {
     const sqrtN = bigSqrt(N);
-    const floatSqrtN = Number(sqrtN.toString().slice(0, 12));
-    const candidates = [
-      Math.max(2, Math.floor(floatSqrtN * 0.85)),
-      Math.max(2, Math.floor(floatSqrtN * 0.95)),
-      Math.max(2, Math.floor(floatSqrtN * 0.99)),
-      Math.max(2, Math.floor(floatSqrtN)),
-      Math.max(2, Math.floor(floatSqrtN * 1.01)),
-      Math.max(2, Math.floor(floatSqrtN * 1.05)),
-      Math.max(2, Math.floor(floatSqrtN * 1.15))
-    ];
-    const r = candidates.length;
+    const baseLn = bigLn(sqrtN);
+    const scales = [0.85, 0.95, 0.99, 1.0, 1.01, 1.05, 1.15];
+    const logCandidates = scales.map((sc) => Math.max(0.6931471805599453, baseLn + Math.log(sc)));
+    const r = logCandidates.length;
     const zeros = ZETA_ZEROS.slice(0, 8);
     const m = zeros.length;
     const S = [];
     for (let i = 0; i < m; i++) {
       const row = [];
-      for (let j = 0; j < r; j++) row.push(Math.cos(zeros[i] * Math.log(candidates[j])));
+      for (let j = 0; j < r; j++) row.push(Math.cos(zeros[i] * logCandidates[j]));
       S.push(row);
     }
-    const A = candidates.map(x => {
+    const A = logCandidates.map(lnX => {
       let sum = 0;
-      for (let k = 0; k < m; k++) sum += Math.cos(zeros[k] * Math.log(x)) / zeros[k];
+      for (let k = 0; k < m; k++) sum += Math.cos(zeros[k] * lnX) / zeros[k];
       return Math.abs(1.0 - 2.0 * sum);
     });
     const STS = Array.from({ length: r }, () => Array(r).fill(0));
@@ -1348,7 +1064,9 @@ export const CHRONOS_WORKER_CODE = `
     fbLogs = [],
     largePrimeBound = 1000000,
     sieveMode = 'v4-fallback',
-    sieveWeights = null
+    sieveWeights = null,
+    zetaSigmaSeed = null,
+    zetaRhoSeed = null
   ) => {
     const smallPrimes = getPrimesUpTo(2000);
     for (let i = 0; i < smallPrimes.length; i++) {
@@ -1368,15 +1086,20 @@ export const CHRONOS_WORKER_CODE = `
     }
 
     const initialBrentCap = nBits > 220 ? 3500 : 25000;
-    const brentFactor = runPollardBrent(targetN, initialBrentCap, workerId + seedOffset);
+    const brentFactor = runPollardBrent(targetN, initialBrentCap, workerId + seedOffset, zetaRhoSeed);
     if (brentFactor && brentFactor > 1n && brentFactor < targetN) return brentFactor;
 
     const sharedMontCtx = (targetN & 1n) === 1n ? createMontgomeryCtx(targetN) : null;
+    if (sharedMontCtx && workerId === 0) {
+      const redcBench = benchmarkWorkerRedcVsNaive(sharedMontCtx, 'web-worker');
+      self.postMessage({ type: 'chronos_redc_benchmark', ...redcBench });
+    }
 
     if ((role === 'ecm' || nBits > 220) && sharedMontCtx) {
       if (workerId === 0) {
         const pm1B1 = nBits > 500 ? 80000 : 30000;
         const pm1B2 = nBits > 500 ? 900000 : 240000;
+        const autoSel = selectAutoCurveFamilyWorker(nBits, pm1B2);
         self.postMessage({
           type: 'chronos_suyama_stage',
           workerId,
@@ -1387,13 +1110,21 @@ export const CHRONOS_WORKER_CODE = `
           sigma: 'p-1 Stage 1+2',
           b1Bound: pm1B1,
           b2Bound: pm1B2,
-          torsionCertified: true
+          torsionCertified: true,
+          stagePhase: 'stage1',
+          curveFamily: autoSel.curveFamily,
+          autoSwitchReason: autoSel.autoSwitchReason,
+          b2ProgressPct: 0,
+          b2GiantStepsDone: 0,
+          b2GiantStepsTotal: 0,
+          dStep: 210
         });
         const pm1 = runMontgomeryPMinus1(sharedMontCtx, pm1B1, pm1B2);
         if (pm1 && pm1.factor && pm1.factor > 1n && pm1.factor < targetN) return pm1.factor;
       } else if (workerId === 1) {
         const pp1B1 = nBits > 500 ? 45000 : 20000;
         const pp1B2 = nBits > 500 ? 450000 : 180000;
+        const autoSel = selectAutoCurveFamilyWorker(nBits, pp1B2);
         self.postMessage({
           type: 'chronos_suyama_stage',
           workerId,
@@ -1404,13 +1135,21 @@ export const CHRONOS_WORKER_CODE = `
           sigma: 'p+1 Lucas Stage 1+2',
           b1Bound: pp1B1,
           b2Bound: pp1B2,
-          torsionCertified: true
+          torsionCertified: true,
+          stagePhase: 'stage1',
+          curveFamily: autoSel.curveFamily,
+          autoSwitchReason: autoSel.autoSwitchReason,
+          b2ProgressPct: 0,
+          b2GiantStepsDone: 0,
+          b2GiantStepsTotal: 0,
+          dStep: 210
         });
         const pp1 = runMontgomeryWilliamsPPlus1(sharedMontCtx, pp1B1, pp1B2, [3n, 6n, 5n, 9n]);
         if (pp1 && pp1.factor && pp1.factor > 1n && pp1.factor < targetN) return pp1.factor;
       } else if (workerId === 2 && nBits > 500 && totalWorkers >= 4) {
         const pm1DeepB1 = 220000;
         const pm1DeepB2 = 2200000;
+        const autoSel = selectAutoCurveFamilyWorker(nBits, pm1DeepB2);
         self.postMessage({
           type: 'chronos_suyama_stage',
           workerId,
@@ -1421,13 +1160,21 @@ export const CHRONOS_WORKER_CODE = `
           sigma: 'Deep p-1 (220k/2.2M)',
           b1Bound: pm1DeepB1,
           b2Bound: pm1DeepB2,
-          torsionCertified: true
+          torsionCertified: true,
+          stagePhase: 'stage1',
+          curveFamily: autoSel.curveFamily,
+          autoSwitchReason: autoSel.autoSwitchReason,
+          b2ProgressPct: 0,
+          b2GiantStepsDone: 0,
+          b2GiantStepsTotal: 0,
+          dStep: 210
         });
         const pm1Deep = runMontgomeryPMinus1(sharedMontCtx, pm1DeepB1, pm1DeepB2);
         if (pm1Deep && pm1Deep.factor && pm1Deep.factor > 1n && pm1Deep.factor < targetN) return pm1Deep.factor;
       } else if (workerId === 3 && nBits > 500 && totalWorkers >= 5) {
         const pp1B1 = 45000;
         const pp1B2 = 450000;
+        const autoSel = selectAutoCurveFamilyWorker(nBits, pp1B2);
         self.postMessage({
           type: 'chronos_suyama_stage',
           workerId,
@@ -1438,7 +1185,14 @@ export const CHRONOS_WORKER_CODE = `
           sigma: 'p+1 Lucas Seeds-B',
           b1Bound: pp1B1,
           b2Bound: pp1B2,
-          torsionCertified: true
+          torsionCertified: true,
+          stagePhase: 'stage1',
+          curveFamily: autoSel.curveFamily,
+          autoSwitchReason: autoSel.autoSwitchReason,
+          b2ProgressPct: 0,
+          b2GiantStepsDone: 0,
+          b2GiantStepsTotal: 0,
+          dStep: 210
         });
         const pp1b = runMontgomeryWilliamsPPlus1(sharedMontCtx, pp1B1, pp1B2, [10n, 11n, 14n, 15n]);
         if (pp1b && pp1b.factor && pp1b.factor > 1n && pp1b.factor < targetN) return pp1b.factor;
@@ -1475,38 +1229,65 @@ export const CHRONOS_WORKER_CODE = `
           : { b1: 110000 + (cycle - 4) * 75000, b2: (110000 + (cycle - 4) * 75000) * 24, curves: 4 };
         const b1 = tier.b1;
         const b2 = tier.b2;
+        const primesB1 = getPrimesUpTo(b1);
 
         for (let c = 0; c < tier.curves; c++) {
           totalCurves++;
           steps += Math.round(b1 / 8);
           const gammaPerturb = BigInt(Math.floor(ZETA_ZEROS[(c + workerId) % ZETA_ZEROS.length] * 1000));
           const workerSeedSkew = BigInt(seedOffset + workerId * 104729 + c * 31337 + cycle * 9973);
-          const sigmaVal = 7n + gammaPerturb + workerSeedSkew + BigInt((c * 7919 + workerId * 65537) & 0xfffff);
-
-          const now = Date.now();
-          if (now - lastTelemetryTime >= 110) {
-            lastTelemetryTime = now;
-            self.postMessage({
-              type: 'chronos_suyama_stage',
-              workerId,
-              totalWorkers,
-              role: 'ecm',
-              cycle,
-              curveIndex: totalCurves,
-              sigma: sigmaVal.toString() + ' · Stage1+2',
-              b1Bound: b1,
-              b2Bound: b2,
-              torsionCertified: true
-            });
+          let baseZetaSigma = 7n;
+          if (zetaSigmaSeed) {
+            try {
+              const parsed = BigInt(zetaSigmaSeed);
+              if (parsed > 5n) baseZetaSigma = parsed;
+            } catch {}
           }
+          const sigmaVal = (cycle === 1 && c === 0 && zetaSigmaSeed)
+            ? baseZetaSigma
+            : (baseZetaSigma + gammaPerturb + workerSeedSkew + BigInt((c * 7919 + workerId * 65537) & 0xfffff));
 
-          const ecmRes = runChronosSuyamaEcm(targetN, sigmaVal, b1, b2, false, sharedMontCtx);
+          const ecmRes = runUnifiedEcmStage1And2(
+            targetN,
+            sigmaVal,
+            b1,
+            b2,
+            primesB1,
+            modInverse,
+            gcd,
+            (prog) => {
+              const now = Date.now();
+              if (c === 0 || prog.stagePhase === 'stage2-b2' || now - lastTelemetryTime >= 90) {
+                lastTelemetryTime = now;
+                self.postMessage({
+                  type: 'chronos_suyama_stage',
+                  workerId,
+                  totalWorkers,
+                  role: 'ecm',
+                  cycle,
+                  curveIndex: totalCurves,
+                  sigma: sigmaVal.toString() + ' · ' + (prog.curveFamily === 'montgomery' ? 'Montgomery' : 'Suyama'),
+                  b1Bound: b1,
+                  b2Bound: b2,
+                  torsionCertified: true,
+                  stagePhase: prog.stagePhase,
+                  curveFamily: prog.curveFamily,
+                  autoSwitchReason: prog.autoSwitchReason,
+                  b2ProgressPct: prog.b2ProgressPct,
+                  b2GiantStepsDone: prog.b2GiantStepsDone,
+                  b2GiantStepsTotal: prog.b2GiantStepsTotal,
+                  dStep: prog.dStep
+                });
+              }
+            },
+            sharedMontCtx
+          );
           if (ecmRes && ecmRes.factor && ecmRes.factor > 1n && ecmRes.factor < targetN) {
             return ecmRes.factor;
           }
         }
 
-        const brentDeep = runPollardBrent(targetN, nBits > 220 ? 12000 : 30000, workerId + cycle * 97 + seedOffset);
+        const brentDeep = runPollardBrent(targetN, nBits > 220 ? 12000 : 30000, workerId + cycle * 97 + seedOffset, zetaRhoSeed);
         if (brentDeep && brentDeep > 1n && brentDeep < targetN) return brentDeep;
         await new Promise(r => setTimeout(r, 1));
       } else {
@@ -1597,7 +1378,9 @@ export const CHRONOS_WORKER_CODE = `
     fbLogs = [],
     largePrimeBound = 1000000,
     sieveMode = 'v4-fallback',
-    sieveWeights = null
+    sieveWeights = null,
+    zetaSigmaSeed = null,
+    zetaRhoSeed = null
   ) => {
     const primeFactors = [];
     const queue = [N];
@@ -1624,7 +1407,9 @@ export const CHRONOS_WORKER_CODE = `
         isRoot ? fbLogs : [],
         largePrimeBound,
         sieveMode,
-        sieveWeights
+        sieveWeights,
+        isRoot ? zetaSigmaSeed : null,
+        isRoot ? zetaRhoSeed : null
       );
       if (f && f > 1n && f < current) {
         queue.push(f);
@@ -1651,13 +1436,15 @@ export const CHRONOS_WORKER_CODE = `
     fbLogs = [],
     largePrimeBound = 1000000,
     sieveMode = 'v4-fallback',
-    sieveWeights = null
+    sieveWeights = null,
+    zetaSigmaSeed = null,
+    zetaRhoSeed = null
   ) => {
     const startTime = Date.now();
     const nBits = N.toString(2).length;
     const totalDigits = N.toString(10).length;
     const roleLabel = role === 'ecm'
-      ? 'ECM-Suyama Scout'
+      ? (zetaSigmaSeed ? 'Zeta-Seeded REDC ECM' : 'ECM-Suyama Scout')
       : (sieveMode === 'v4-fallback' ? 'SIQS v4 Fast-2LP' : 'SIQS Vanilla');
 
     self.postMessage({
@@ -1688,7 +1475,9 @@ export const CHRONOS_WORKER_CODE = `
       fbLogs,
       largePrimeBound,
       sieveMode,
-      sieveWeights
+      sieveWeights,
+      zetaSigmaSeed,
+      zetaRhoSeed
     );
     const duration = Date.now() - startTime;
 
@@ -1718,13 +1507,15 @@ export const CHRONOS_WORKER_CODE = `
       fbLogs = [],
       largePrimeBound = 1000000,
       sieveMode = 'v4-fallback',
-      sieveWeights = null
+      sieveWeights = null,
+      zetaSigmaSeed = null,
+      zetaRhoSeed = null
     } = e.data;
     if (type === 'start') {
       try {
         const N = BigInt(n);
         const M = targetM ? BigInt(targetM) : N;
-        const res = await runChronos196(N, M, role, workerId, totalWorkers, siqsRank, siqsTotalWorkers, seedOffset, fbPrimes, fbRoots, fbLogs, largePrimeBound, sieveMode, sieveWeights);
+        const res = await runChronos196(N, M, role, workerId, totalWorkers, siqsRank, siqsTotalWorkers, seedOffset, fbPrimes, fbRoots, fbLogs, largePrimeBound, sieveMode, sieveWeights, zetaSigmaSeed, zetaRhoSeed);
 
         if (res && res.factors && res.factors.length > 0) {
           self.postMessage({
