@@ -66,19 +66,34 @@ export const ZetaSpectrumModule: React.FC = () => {
   const activeDir = hoverDirIdx !== null ? dirichletData[hoverDirIdx] : dirichletData[0];
   const activeCount = hoverCountIdx !== null ? countingData[hoverCountIdx] : countingData[countingData.length - 1];
 
+  const truncationAudit = useMemo(() => {
+    if (!countingData.length) return { rmse: 0, maxErr: 0 };
+    let sq = 0;
+    let mx = 0;
+    for (const pt of countingData) {
+      const diff = Math.abs(pt.riemannApprox - pt.piActual);
+      sq += diff * diff;
+      if (diff > mx) mx = diff;
+    }
+    return {
+      rmse: Number(Math.sqrt(sq / countingData.length).toFixed(3)),
+      maxErr: Number(mx.toFixed(3))
+    };
+  }, [countingData]);
+
   return (
     <div className="space-y-6">
       {/* Header & Equations Card */}
       <div className="bg-white border border-[#E2DDD2] rounded-xl p-6 space-y-4">
         <div className="space-y-1 border-b border-[#E2DDD2] pb-4">
           <div className="text-xs font-mono text-[#1E3A8A]">
-            الفصل الرابع · متسلسلة دركليه وأصفار ريمان والطيف الإحصائي
+            الفصل الرابع · متسلسلة دركليه وأصفار ريمان والطيف الإحصائي · مختبر استكشافي بحدود خطأ مقاسة
           </div>
           <h2 className="text-xl md:text-2xl font-bold font-serif-academic text-[#1C1917]">
             محاكاة دالة زيتا الأولية <MathFormula tex="P(s)" /> ومتسلسلة <MathFormula tex="\mathcal{D}(s)" />
           </h2>
           <p className="text-sm text-[#57534E] leading-relaxed max-w-3xl">
-            تتحكم أصفار ريمان غير التافهة <MathFormula tex="\rho_k = \tfrac{1}{2} + i\gamma_k" /> في التوزيع الطيفي للأعداد الأولية والشبه أولية عبر <MathFormula tex="P(s) = \sum_{k\ge 1} \frac{\mu(k)}{k}\log\zeta(ks)" />؛ فهي ترشد البحث الإحصائي، بينما القسمة والغربلة تحسمان تفكيك العدد بعينه.
+            تتحكم أصفار ريمان غير التافهة <MathFormula tex="\rho_k = \tfrac{1}{2} + i\gamma_k" /> في التوزيع الإحصائي للأعداد الأولية عبر <MathFormula tex="P(s)" />؛ هذه الطبقة تقدم إرشاداً إحصائياً وبحوثاً تجريبية (وليست خوارزمية تفكيك حتمية)، مع قياس مباشر لخطأ البتر <MathFormula tex="|R_K(x) - \pi(x)|" />.
           </p>
         </div>
 
@@ -96,6 +111,21 @@ export const ZetaSpectrumModule: React.FC = () => {
               display
               tex="R(x)=\sum_{k=1}^{K_\mu}\frac{\mu(k)}{k}\operatorname{li}(x^{1/k}) - \sum_{k=1}^{K_\gamma}\frac{2\sqrt{x}\cos(\gamma_k\ln x-\theta_k)}{\ln x\sqrt{\tfrac{1}{4}+\gamma_k^2}}"
             />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono-tabular bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2]" dir="ltr">
+          <div>
+            <span className="text-[#57534E] block text-[11px]">RMSE |R_K(x) − π(x)|</span>
+            <strong className="text-[#14532D] text-sm">{truncationAudit.rmse}</strong>
+          </div>
+          <div>
+            <span className="text-[#57534E] block text-[11px]">Max Truncation Error</span>
+            <strong className="text-[#9A3412] text-sm">{truncationAudit.maxErr}</strong>
+          </div>
+          <div>
+            <span className="text-[#57534E] block text-[11px]">Theoretical RH Bound</span>
+            <strong className="text-[#1E3A8A] text-[11px]">O(√x · ln(x) / γ_K)</strong>
           </div>
         </div>
       </div>

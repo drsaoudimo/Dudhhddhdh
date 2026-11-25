@@ -13,6 +13,7 @@ export interface UnifiedRaceHints {
 
 export interface UnifiedSharedGf2Stats {
   siqsRelations: number;
+  hgsRelations: number;
   cfracRelations: number;
   totalFullRelations: number;
   targetRelations: number;
@@ -123,15 +124,9 @@ export const runUnifiedFastScout = (
   }
 
   const nBits = nBig.toString(2).length;
-
-  // 3. ZF-15 / ZF-17 / ZF-16 Spectral Worker Guidance
   let zfGuidance: ZfSmartAnalysisResult | null = null;
-  try {
-    zfGuidance = analyzeTargetWithZf151716(nBig, workerCount);
-    scoutOps += 48;
-  } catch {}
 
-  // 4. Instantaneous >500-bit SNFS & Aurifeuillean Algebraic Split (runs before heavy Rho so 770b+ SNFS resolves in <2ms)
+  // 3. Instantaneous >500-bit SNFS & Aurifeuillean Algebraic Split (runs before heavy Rho so 770b+ SNFS resolves in <2ms)
   const snfs = analyzeSnfsAndCadoParams(nBig);
   scoutOps += 64;
   if (snfs.isSpecialForm && snfs.algebraicFactor) {
@@ -194,7 +189,7 @@ export const runUnifiedFastScout = (
     }
   }
 
-  // 5. >500-bit RSA Weak-Key Attacks (Wiener CF + Boneh-Durfee LLL) when public exponent e is given
+  // 4. >500-bit RSA Weak-Key Attacks (Wiener CF + Boneh-Durfee LLL) when public exponent e is given
   const eBig = parseCleanBigInt(hints?.publicExponentE);
   if (eBig && eBig >= 3n) {
     const wiener = runWienerAttack(nBig, eBig);
@@ -239,7 +234,7 @@ export const runUnifiedFastScout = (
     }
   }
 
-  // 6. Ψ-Factor Fast Hybrid Pre-Scout (Wheel-30 + Fermat + bounded Brent Rho; lighter on >220b before Web Workers spawn)
+  // 5. Ψ-Factor Fast Hybrid Pre-Scout (Wheel-30 + Fermat + bounded Brent Rho; lighter on >220b before Web Workers spawn)
   const psiRes = runPsiFactor(nBig, {
     mode: 'psi-hybrid',
     wheelPrimes: [2, 3, 5],
@@ -264,7 +259,7 @@ export const runUnifiedFastScout = (
     };
   }
 
-  // 7. ZF-18 Coppersmith LLL when partial prime hint p0 is supplied
+  // 6. ZF-18 Coppersmith LLL when partial prime hint p0 is supplied
   const p0Big = parseCleanBigInt(hints?.partialPrimeP0);
   if (p0Big && p0Big > 0n) {
     const estUnknown =
@@ -291,6 +286,12 @@ export const runUnifiedFastScout = (
     }
   }
 
+  // 7. ZF-15 / ZF-17 / ZF-16 Spectral Worker Guidance (only computed when launching parallel workers)
+  try {
+    zfGuidance = analyzeTargetWithZf151716(nBig, workerCount);
+    scoutOps += 48;
+  } catch {}
+
   return {
     hit: false,
     winningEngine: null,
@@ -300,6 +301,6 @@ export const runUnifiedFastScout = (
     scoutOps,
     elapsedMs: Number((performance.now() - t0).toFixed(2)),
     zfGuidance,
-    noteAr: 'انطلقت الخيوط المتوازية (Chronos SIQS + CFRAC + REDC ECM/p±1) في سباق مفتوح بمصفوفة GF(2) موحدة.'
+    noteAr: 'انطلقت الخيوط المتوازية (Chronos SIQS + HGS + CFRAC + REDC ECM/p±1) في سباق مفتوح بمصفوفة GF(2) موحدة (markowitz-core).'
   };
 };

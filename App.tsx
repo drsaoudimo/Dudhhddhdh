@@ -1,14 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import forge from 'node-forge';
-import { generatePrime } from './mathUtils';
+import { bigIntSqrt, generatePrime } from './mathUtils';
 import { RSAKey, SimulationState } from './types';
 import TerminalLog from './components/TerminalLog';
 import Chronos196Dashboard, { ChronosSuyamaInfo, ChronosCfracInfo, WorkerThreadStat, Gf2PoolStats } from './components/Chronos196Dashboard';
+import WorkerMatrixMonitor, { Gf2MonitorState } from './components/WorkerMatrixMonitor';
 import FactorizerModule, { PrimaryFactorAlgorithm } from './components/FactorizerModule';
 import CoppersmithLabPanel from './components/CoppersmithLabPanel';
 import Zf1819LabPanel from './components/Zf1819LabPanel';
 import PsiFactorLabPanel from './components/PsiFactorLabPanel';
+import Ppfo2000LabPanel from './components/Ppfo2000LabPanel';
+import PythonConsoleModule from './components/PythonConsoleModule';
 import Rsa500PlusLabPanel from './components/Rsa500PlusLabPanel';
 import CfracTelemetryPanel from './components/CfracTelemetryPanel';
 import ZetaFactorPanel, { ZetaLiveTrace } from './components/ZetaFactorPanel';
@@ -16,6 +19,7 @@ import MatrixInspectorModule from './components/MatrixInspectorModule';
 import InfiniteMatrixModule from './components/InfiniteMatrixModule';
 import ZetaSpectrumModule from './components/ZetaSpectrumModule';
 import ZfProjectSummaryModule from './components/ZfProjectSummaryModule';
+import CmveVerificationPanel from './components/CmveVerificationPanel';
 import { PRIMES_LIST } from './constants';
 import { A1_MATRIX, ANT_MATRIX, M_MATRIX, generateSimulationMatrices } from './matricesData';
 import { ALGEBRAIC_WORKER_CODE } from './algebraicWorker';
@@ -26,13 +30,13 @@ import { ZETA_WORKER_CODE } from './zetaWorker';
 import { UNBOUNDED_QS_WORKER_CODE } from './unboundedQsWorker';
 import { CHRONOS_WORKER_CODE } from './chronosWorker';
 import { CFRAC_WORKER_CODE } from './cfracWorker';
+import { HGS_WORKER_CODE } from './hgsWorker';
+import HgsDashboard, { HgsTraceState } from './components/HgsDashboard';
 import {
   buildMpqsFactorBase,
   buildCfracSharedUnionFactorBase,
   CfracSharedUnionFb,
-  selectKnuthSchroeppelMultiplier,
   selectRankedKnuthSchroeppelMultipliers,
-  solveBlockWiedemann,
   SingleLargePrimePool,
   isProbablePrimeBig,
   SmoothRelation
@@ -40,7 +44,13 @@ import {
 import { analyzeSnfsAndCadoParams } from './snfsDetector';
 import { computeV4SieveDiagnostics, EmpiricalBenchmarkRun, SieveAllocationMode } from './v4FallbackOptimizer';
 import { runUnifiedFastScout, UnifiedRaceHints, UnifiedRaceSummary } from './lib/chronosUnifiedRace';
+import {
+  cacheFactorization,
+  computeUniversalExponentReport,
+  getCachedFactorization
+} from './lib/universalExponentEngine';
 import { generateUltraPreciseZetaSeeds, UltraPreciseZetaSeed } from './lib/zfSmartIntegrator';
+import { evaluateZetaGuidanceForGf2, ZetaGf2GuidanceResult } from './lib/zetaGf2Advisor';
 import { benchmarkRedcVsNaive, getWorkerMontRedcCode, RedcBenchmarkResult } from './lib/montgomeryRedcKernel';
 import { Language, translations } from './translations';
 
@@ -74,11 +84,12 @@ const App: React.FC = () => {
   const isRTL = lang === 'ar';
 
   const [keySize, setKeySize] = useState<number>(116);
-  const [strategy, setStrategy] = useState<'chronos-196' | 'cfrac' | 'unbounded-qs' | 'hybrid' | 'zeta' | 'mmfr' | 'gleeok' | 'ecm' | 'pollard' | 'algebraic'>('chronos-196');
+  const [strategy, setStrategy] = useState<'chronos-196' | 'hgs' | 'cfrac' | 'unbounded-qs' | 'hybrid' | 'zeta' | 'mmfr' | 'gleeok' | 'ecm' | 'pollard' | 'algebraic'>('chronos-196');
   const [primaryAlgorithm, setPrimaryAlgorithm] = useState<PrimaryFactorAlgorithm>('chronos-196');
-  const [view, setView] = useState<'factorizer' | 'inspector' | 'infinite' | 'zeta' | 'zf-summary'>('factorizer');
+  const [view, setView] = useState<'factorizer' | 'inspector' | 'infinite' | 'zeta' | 'zf-summary' | 'cmve'>('factorizer');
   const [selectedBlockPair, setSelectedBlockPair] = useState<{ p: number; q: number }>({ p: 7, q: 53 });
   const [zetaTrace, setZetaTrace] = useState<ZetaLiveTrace | null>(null);
+  const [hgsTrace, setHgsTrace] = useState<HgsTraceState | null>(null);
   const [bd500ZetaSeeds, setBd500ZetaSeeds] = useState<UltraPreciseZetaSeed[]>([]);
 
   // Chronos v2 Hybrid states
@@ -109,13 +120,16 @@ const App: React.FC = () => {
   const [qsUserStartDepth, setQsUserStartDepth] = useState<number>(1);
   const [qsUserMaxDepth, setQsUserMaxDepth] = useState<number | 'auto'>('auto');
   
-  const [rsaKey, setRsaKey] = useState<RSAKey | null>({
-    p: DEFAULT_196_P,
-    q: DEFAULT_196_Q,
-    n: DEFAULT_196_N,
-    e: "65537",
-    d: "???",
-    bits: 196
+  const [rsaKey, setRsaKey] = useState<RSAKey | null>(() => {
+    const rep = computeUniversalExponentReport(DEFAULT_196_N, 'standard', 0.258, DEFAULT_196_P, DEFAULT_196_Q);
+    return {
+      p: DEFAULT_196_P,
+      q: DEFAULT_196_Q,
+      n: DEFAULT_196_N,
+      e: rep.minimalPublicExponentE || rep.publicExponentE || '???',
+      d: rep.minimalPrivateExponentD || rep.privateExponentD || '???',
+      bits: 196
+    };
   });
 
   const [workerActive, setWorkerActive] = useState(false);
@@ -127,6 +141,9 @@ const App: React.FC = () => {
   const [hybridFingerprint, setHybridFingerprint] = useState<any>(null);
   const [hybridTrace, setHybridTrace] = useState<any>(null);
   const [hybridEcmStats, setHybridEcmStats] = useState<any>(null);
+  const [stopStage1OnUniversalExp, setStopStage1OnUniversalExp] = useState<boolean>(true);
+  const [universalExpStage1Halted, setUniversalExpStage1Halted] = useState<boolean>(false);
+  const [isUniversalExpPending, setIsUniversalExpPending] = useState<boolean>(false);
 
   const [simState, setSimState] = useState<SimulationState>({
     status: 'idle',
@@ -174,6 +191,21 @@ const App: React.FC = () => {
     totalOperations: 0
   });
   const [redcSpeedupInfo, setRedcSpeedupInfo] = useState<RedcBenchmarkResult | null>(null);
+  const [gf2Monitor, setGf2Monitor] = useState<Gf2MonitorState>({
+    solverStage: 'idle',
+    offThreadActive: false,
+    sieversPausedForGf2: false,
+    manualPaused: false,
+    directFullCount: 0,
+    partialCount: 0,
+    pendingCyclesCount: 0,
+    materializedCyclesCount: 0,
+    totalRows: 0,
+    totalCols: 0,
+    lastTimings: null,
+    solveCount: 0,
+    lastSolveError: null
+  });
 
   useEffect(() => {
     const rawN = rsaKey?.n?.trim();
@@ -197,15 +229,23 @@ const App: React.FC = () => {
   const workersRef = useRef<Worker[]>([]);
   const workerUrlsRef = useRef<string[]>([]);
   const workerRef = useRef<Worker | null>(null);
+  const gf2WorkerRef = useRef<Worker | null>(null);
+  const gf2InFlightRef = useRef<boolean>(false);
+  const gf2SolveSeqRef = useRef<number>(0);
+  const manualPauseRef = useRef<boolean>(false);
+  const pauseStartedAtRef = useRef<number | null>(null);
+  const totalPausedMsRef = useRef<number>(0);
   const raceTimerRef = useRef<number | null>(null);
+  const universalExpRunRef = useRef<boolean>(false);
+  const stopStage1OnUniversalExpRef = useRef<boolean>(true);
+  stopStage1OnUniversalExpRef.current = stopStage1OnUniversalExp;
 
   const getAutoWorkersCount = (bits: number): number => {
     const hw = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) ? navigator.hardwareConcurrency : 8;
     if (bits <= 96) return Math.min(2, hw);
     if (bits <= 128) return Math.min(4, hw);
-    if (bits <= 220) return Math.min(12, Math.max(4, hw));
-    if (bits <= 480) return Math.min(8, hw);
-    return Math.min(16, Math.max(8, hw));
+    if (bits <= 272) return Math.min(12, Math.max(4, hw));
+    return Math.min(16, Math.max(4, hw));
   };
 
   const targetBits = rsaKey?.bits || 196;
@@ -410,11 +450,39 @@ const App: React.FC = () => {
       workerUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
       workerUrlsRef.current = [];
       workerRef.current?.terminate();
+      gf2WorkerRef.current?.terminate();
     };
   }, []);
 
   const addLog = (msg: string) => {
     setSimState(prev => ({ ...prev, logs: [...prev.logs, msg] }));
+  };
+
+  const handleTogglePauseSievers = () => {
+    if (!workerActive || gf2InFlightRef.current) return;
+    const nextPaused = !manualPauseRef.current;
+    manualPauseRef.current = nextPaused;
+    if (nextPaused) {
+      if (pauseStartedAtRef.current === null) pauseStartedAtRef.current = Date.now();
+    } else if (pauseStartedAtRef.current !== null) {
+      totalPausedMsRef.current += Math.max(0, Date.now() - pauseStartedAtRef.current);
+      pauseStartedAtRef.current = null;
+    }
+    const msgType = nextPaused ? 'pause' : 'resume';
+    workersRef.current.forEach(w => {
+      try {
+        w.postMessage({ type: msgType });
+      } catch {}
+    });
+    setWorkerThreadsStats(prev =>
+      prev.map(s => ({
+        ...s,
+        paused: nextPaused,
+        pauseReason: nextPaused ? 'manual' : null
+      }))
+    );
+    setGf2Monitor(prev => ({ ...prev, manualPaused: nextPaused }));
+    addLog(nextPaused ? '⏸ تم إيقاف خيوط الغربلة مؤقتاً يدوياً.' : '▶ تم استئناف عمل خيوط الغربلة.');
   };
 
   const stopAttack = () => {
@@ -432,9 +500,26 @@ const App: React.FC = () => {
       workerRef.current.terminate();
       workerRef.current = null;
     }
+    if (gf2WorkerRef.current) {
+      gf2WorkerRef.current.terminate();
+      gf2WorkerRef.current = null;
+    }
+    gf2InFlightRef.current = false;
+    manualPauseRef.current = false;
+    pauseStartedAtRef.current = null;
+    totalPausedMsRef.current = 0;
     setWorkerActive(false);
+    setIsUniversalExpPending(false);
+    universalExpRunRef.current = false;
     setCpuUsage(0);
-    setWorkerThreadsStats(prev => prev.map(s => ({ ...s, active: false, stage: 'Stopped' })));
+    setWorkerThreadsStats(prev => prev.map(s => ({ ...s, active: false, paused: false, pauseReason: null, stage: 'Stopped' })));
+    setGf2Monitor(prev => ({
+      ...prev,
+      solverStage: 'idle',
+      offThreadActive: false,
+      sieversPausedForGf2: false,
+      manualPaused: false
+    }));
     setUnifiedRace(prev => (prev.status === 'racing' ? { ...prev, status: 'idle' } : prev));
     addLog(t.statusFailed);
     setSimState(prev => ({ ...prev, status: 'idle' }));
@@ -456,15 +541,17 @@ const App: React.FC = () => {
         solution: null
       });
 
-      setRsaKey({ n: nBig.toString(), p: "???", q: "???", e: "65537", d: "???", bits: bits });
+      setRsaKey({ n: nBig.toString(), p: "???", q: "???", e: "???", d: "???", bits: bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
       setZetaTrace(null);
+      setHgsTrace(null);
       setBd500ZetaSeeds([]);
       setShowInputN(false);
       setCustomN("");
       setHybridFingerprint(null);
       setHybridTrace(null);
       setHybridEcmStats(null);
+      setUniversalExpStage1Halted(false);
     } catch(e: any) {
       addLog(`Error: ${e.message}`);
     }
@@ -491,11 +578,16 @@ const App: React.FC = () => {
       const nStr = key.n.toString(10);
       const eStr = key.e.toString(10);
       const bits = BigInt(nStr).toString(2).length;
+      if (p !== '???' && q !== '???') {
+        cacheFactorization(nStr, p, q, [p, q], 'PEM Private Key');
+      }
 
       setRsaKey({ n: nStr, p, q, e: eStr, d, bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
       setZetaTrace(null);
+      setHgsTrace(null);
       setBd500ZetaSeeds([]);
+      setUniversalExpStage1Halted(false);
       if (eStr && eStr !== '65537') {
         setUnifiedHints(prev => ({ ...prev, publicExponentE: eStr }));
       }
@@ -523,10 +615,12 @@ const App: React.FC = () => {
       const cleanN = nStr.replace(/[^0-9]/g, '');
       const nBig = BigInt(cleanN);
       const bits = nBig.toString(2).length;
-      setRsaKey({ n: cleanN, p: "???", q: "???", e: "65537", d: "???", bits });
+      setRsaKey({ n: cleanN, p: "???", q: "???", e: "???", d: "???", bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
       setZetaTrace(null);
+      setHgsTrace(null);
       setBd500ZetaSeeds([]);
+      setUniversalExpStage1Halted(false);
       setSimState({
         status: 'idle',
         logs: [`>> Benchmark Selected: ${bits}-bit Target Modulus.`, `N = ${cleanN}`],
@@ -536,7 +630,7 @@ const App: React.FC = () => {
         solution: null
       });
       setView('factorizer');
-      if (primaryAlgorithm !== 'cfrac' && primaryAlgorithm !== 'zeta') {
+      if (primaryAlgorithm !== 'cfrac' && primaryAlgorithm !== 'zeta' && primaryAlgorithm !== 'hgs') {
         setStrategy('chronos-196');
       }
       setChronosMDual(null);
@@ -551,10 +645,12 @@ const App: React.FC = () => {
       if (!cleanN) return;
       const nBig = BigInt(cleanN);
       const bits = nBig.toString(2).length;
-      setRsaKey({ n: cleanN, p: "???", q: "???", e: "65537", d: "???", bits });
+      setRsaKey({ n: cleanN, p: "???", q: "???", e: "???", d: "???", bits });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
       setZetaTrace(null);
+      setHgsTrace(null);
       setBd500ZetaSeeds([]);
+      setUniversalExpStage1Halted(false);
       setSimState({
         status: 'idle',
         logs: [`>> Target Modulus Updated: ${bits}-bit.`, `N = ${cleanN}`],
@@ -569,11 +665,107 @@ const App: React.FC = () => {
     }
   };
 
+  const handleComputeUniversalExponent = (targetN?: string) => {
+    const clean = (targetN ?? rsaKey?.n ?? '').replace(/[^0-9]/g, '');
+    if (!clean) return;
+    if (workerActive) {
+      stopAttack();
+    }
+    const nBig = BigInt(clean);
+    const bits = nBig.toString(2).length;
+    if (clean !== rsaKey?.n) {
+      setRsaKey({ n: clean, p: '???', q: '???', e: '???', d: '???', bits });
+      setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+    }
+
+    const rep = computeUniversalExponentReport(clean, 'standard', 0.258, undefined, undefined, {
+      stopStage1BeforeFactors: stopStage1OnUniversalExp
+    });
+
+    if (rep.isComplete) {
+      setIsUniversalExpPending(false);
+      if (stopStage1OnUniversalExp) {
+        setUniversalExpStage1Halted(true);
+        setSimState(prev => ({
+          ...prev,
+          status: 'idle',
+          solution: null,
+          logs: [
+            ...prev.logs,
+            `⏹ تم إيقاف المرحلة 1 قبل إيجاد/عرض العوامل فور إيجاد الأس العام λ(N) (${rep.lambdaBits} بت).`,
+            `λ(N) = ${rep.lambdaN}`,
+            `Verified a^λ(N) ≡ 1 (mod N) on ${rep.verifiedBasesCount} bases: ${rep.lambdaVerified}`
+          ]
+        }));
+      } else {
+        setUniversalExpStage1Halted(false);
+        addLog(`✓ الأس العام الكامل λ(N) = ${rep.lambdaN} (تم الحساب بدقة تامة).`);
+      }
+      return;
+    }
+
+    // Large unknown composite (>88b): escalate to async Stage 1 workers to guarantee exact λ(N),
+    // stopping Stage 1 BEFORE emitting factor decomposition when stopStage1OnUniversalExp is active.
+    runAttack(clean, 'chronos-196', undefined, true);
+  };
+
+  const handleRevealFactorsAfterStage1 = () => {
+    const clean = (rsaKey?.n || '').replace(/[^0-9]/g, '');
+    if (!clean) return;
+    setUniversalExpStage1Halted(false);
+    const cached = getCachedFactorization(clean);
+    if (cached) {
+      const list = (cached.allFactors && cached.allFactors.length > 0 ? cached.allFactors : [cached.p, cached.q])
+        .map(v => v.toString());
+      setSimState(prev => ({
+        ...prev,
+        status: 'success',
+        solution: {
+          x: 'Identified',
+          y: 'Identified',
+          factor1: list[0],
+          factor2: list.slice(1).join(' × ') || list[0],
+          allFactors: list
+        } as any,
+        logs: [...prev.logs, `▶ تم استكمال وعرض العوامل الأولية للمودول (${list.join(' × ')}).`]
+      }));
+      return;
+    }
+    const rep = computeUniversalExponentReport(clean, 'standard', 0.258, undefined, undefined, {
+      stopStage1BeforeFactors: false
+    });
+    if (rep.isComplete && rep.factors.length > 0) {
+      const expanded: string[] = [];
+      for (const f of rep.factors) {
+        for (let i = 0; i < f.power; i++) expanded.push(f.prime);
+      }
+      setSimState(prev => ({
+        ...prev,
+        status: 'success',
+        solution: {
+          x: 'Identified',
+          y: 'Identified',
+          factor1: expanded[0],
+          factor2: expanded.slice(1).join(' × ') || expanded[0],
+          allFactors: expanded
+        } as any
+      }));
+    } else {
+      runAttack(clean, 'chronos-196', undefined, false);
+    }
+  };
+
   const runAttack = async (
     overrideN?: string,
-    strategyOverride?: 'chronos-196' | 'cfrac' | 'zeta',
-    hintsOverride?: UnifiedRaceHints
+    strategyOverride?: 'chronos-196' | 'hgs' | 'cfrac' | 'zeta',
+    hintsOverride?: UnifiedRaceHints,
+    universalExponentOnly = false
   ) => {
+    universalExpRunRef.current = universalExponentOnly;
+    setIsUniversalExpPending(universalExponentOnly);
+    if (!universalExponentOnly) {
+      setUniversalExpStage1Halted(false);
+    }
     const activeStrat = strategyOverride || strategy;
     if (strategyOverride && strategyOverride !== strategy) {
       setStrategy(strategyOverride);
@@ -591,11 +783,34 @@ const App: React.FC = () => {
     workersRef.current = [];
     workerUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
     workerUrlsRef.current = [];
+    if (gf2WorkerRef.current) {
+      gf2WorkerRef.current.terminate();
+      gf2WorkerRef.current = null;
+    }
+    gf2InFlightRef.current = false;
+    manualPauseRef.current = false;
+    pauseStartedAtRef.current = null;
+    totalPausedMsRef.current = 0;
+    setGf2Monitor({
+      solverStage: 'idle',
+      offThreadActive: false,
+      sieversPausedForGf2: false,
+      manualPaused: false,
+      directFullCount: 0,
+      partialCount: 0,
+      pendingCyclesCount: 0,
+      materializedCyclesCount: 0,
+      totalRows: 0,
+      totalCols: 0,
+      lastTimings: null,
+      solveCount: 0,
+      lastSolveError: null
+    });
 
     const nBigInit = BigInt(N);
     const nBitsInit = nBigInit.toString(2).length;
     if (cleanOverride && cleanOverride !== rsaKey?.n) {
-      setRsaKey({ n: N, p: "???", q: "???", e: "65537", d: "???", bits: nBitsInit });
+      setRsaKey({ n: N, p: "???", q: "???", e: "???", d: "???", bits: nBitsInit });
     }
 
     const activeHints: UnifiedRaceHints = hintsOverride ?? {
@@ -627,9 +842,31 @@ const App: React.FC = () => {
     setChronosMDual(null);
     setCfracInfo(null);
     setZetaTrace(null);
+    setHgsTrace(activeStrat === 'hgs' ? {
+      stage: 'presieve',
+      stageMessage: 'HGS 32KB Tiled Arrays + SQUFOF Initializing Across All Cores...',
+      factorBase: [],
+      factorBaseSize: 0,
+      polynomial: 'SIQS Q(x) = A x² + 2Bx + C (Gray-Code + 32KB-Tiled)',
+      smoothCount: 0,
+      targetSmooth: 45,
+      scannedCount: 0,
+      skippedCount: 0,
+      relations: [],
+      matrixPreview: [],
+      congruence: null,
+      factorTree: null,
+      activeWorkers: Math.max(1, effectiveWorkerCount),
+      relRatePerSec: 0,
+      lpCollisions: 0,
+      partialCount: 0,
+      squfof2LpCount: 0,
+      blocksProcessed: 0
+    } : null);
     setCurrentStage(1);
+    setChronosSteps(0);
 
-    if (activeStrat === 'chronos-196') {
+    if (activeStrat === 'chronos-196' || activeStrat === 'hgs' || activeStrat === 'cfrac') {
       setUnifiedRace({
         status: 'racing',
         winningEngine: null,
@@ -647,6 +884,7 @@ const App: React.FC = () => {
       const isChronos = activeStrat === 'chronos-196';
       const isCfrac = activeStrat === 'cfrac';
       const isZeta = activeStrat === 'zeta';
+      const isHgs = activeStrat === 'hgs';
 
       // Fast Unified Race Scout (Ψ-Factor + >500b SNFS/Wiener/BD + ZF-18 Coppersmith + ZF-15/17 Spectral Guidance + 500d Zeta Seeds)
       let scoutOps = 0;
@@ -657,9 +895,12 @@ const App: React.FC = () => {
         zetaRhoSeed?: string;
       }> = [];
 
+      let localZetaSeeds: UltraPreciseZetaSeed[] = bd500ZetaSeeds;
+
       if (isZeta) {
         try {
           const seeds500 = generateUltraPreciseZetaSeeds(nBig, 6, 48);
+          localZetaSeeds = seeds500;
           setBd500ZetaSeeds(seeds500);
           if (seeds500.length > 0) {
             addLog(`>> [BD500 Zeta Seeds] 48 zeros active · Peak#1 δ*=${seeds500[0].delta500d.slice(0, 16)} · p_seed≈${seeds500[0].candidatePSeed.slice(0, 16)}... · σ=${seeds500[0].ecmSigmaSeed} · k=${seeds500[0].suggestedK}`);
@@ -671,6 +912,7 @@ const App: React.FC = () => {
         const scout = runUnifiedFastScout(nBig, effectiveWorkerCount, activeHints);
         scoutOps = scout.scoutOps;
         if (scout.zfGuidance?.zetaSeeds?.length) {
+          localZetaSeeds = scout.zfGuidance.zetaSeeds;
           setBd500ZetaSeeds(scout.zfGuidance.zetaSeeds);
         }
         if (scout.zfGuidance?.workerGuidance) {
@@ -690,7 +932,20 @@ const App: React.FC = () => {
           const sorted = [...scout.factors].map(v => BigInt(v)).sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
           const durationMs = Math.max(1, Math.round(Date.now() - runStartedAt));
           setWorkerActive(false);
+          setIsUniversalExpPending(false);
           setCpuUsage(0);
+          if (sorted.length >= 2) {
+            cacheFactorization(N, sorted[0], (nBig / BigInt(sorted[0])).toString(), sorted, scout.winningEngine || 'Unified Fast Scout');
+          }
+          if (universalExpRunRef.current && stopStage1OnUniversalExpRef.current) {
+            setUniversalExpStage1Halted(true);
+            setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+            const rep = computeUniversalExponentReport(N, 'standard', 0.258, undefined, undefined, { stopStage1BeforeFactors: true });
+            addLog(`⏹ تم إيقاف المرحلة 1 قبل عرض العوامل فور تحديد الأس العام λ(N) (${durationMs}ms).`);
+            addLog(`λ(N) = ${rep.lambdaN}`);
+            setSimState(prev => ({ ...prev, status: 'idle', solution: null }));
+            return;
+          }
           setUnifiedRace({
             status: 'success',
             winningEngine: scout.winningEngine || 'Unified Fast Scout',
@@ -720,14 +975,118 @@ const App: React.FC = () => {
         }
       }
 
+      // Fast Pre-Sieve for standalone HGS (even / exact square / prime / small primes < 30000)
+      if (isHgs) {
+        const makeTree = (f1: bigint, f2: bigint) => ({
+          value: nBig.toString(),
+          bits: nBitsVal,
+          isPrime: false,
+          left: { value: f1.toString(), bits: f1.toString(2).length, isPrime: isProbablePrimeBig(f1, 8), role: 'factor_p' },
+          right: { value: f2.toString(), bits: f2.toString(2).length, isPrime: isProbablePrimeBig(f2, 8), role: 'factor_q' }
+        });
+        let preFactor: bigint | null = null;
+        let preMethod = '';
+        let preOps = 0;
+        if ((nBig & 1n) === 0n && nBig > 2n) {
+          preFactor = 2n;
+          preOps = 2;
+          preMethod = 'HGS Pre-Sieve (Even Modulus)';
+        } else {
+          const sq = bigIntSqrt(nBig);
+          preOps += 4;
+          if (sq * sq === nBig) {
+            preFactor = sq;
+            preMethod = 'HGS Pre-Sieve (Exact Square)';
+          } else {
+            preOps += 10;
+            if (isProbablePrimeBig(nBig, 10)) {
+              const durationMs = Math.max(1, Date.now() - runStartedAt);
+              setWorkerActive(false);
+              setCpuUsage(0);
+              setChronosSteps(preOps);
+              setUnifiedRace({
+                status: 'success',
+                winningEngine: 'Miller-Rabin Pre-Check (Prime N)',
+                factors: [nBig.toString()],
+                verifiedProduct: true,
+                verifiedPrimes: true,
+                elapsedMs: durationMs,
+                totalOperations: preOps
+              });
+              setHgsTrace(prev => prev ? {
+                ...prev,
+                stage: 'success',
+                duration: durationMs,
+                factorTree: { value: nBig.toString(), bits: nBitsVal, isPrime: true }
+              } : prev);
+              addLog(`✓ العدد N اجتاز فحص الأولية المحتملة (10 أساسات Miller-Rabin · ${preOps} ops).`);
+              setSimState(prev => ({
+                ...prev,
+                status: 'success',
+                solution: { x: 'Prime', y: 'Prime', factor1: nBig.toString(), factor2: '1', allFactors: [nBig.toString()] } as any,
+                executionTime: durationMs / 1000,
+                cycles: preOps
+              }));
+              return;
+            }
+            for (let i = 0; i < PRIMES_LIST.length; i++) {
+              const p = BigInt(PRIMES_LIST[i]);
+              if (p >= nBig) break;
+              preOps++;
+              if (nBig % p === 0n) {
+                preFactor = p;
+                preMethod = `HGS Pre-Sieve Small Prime (p=${p})`;
+                break;
+              }
+            }
+          }
+        }
+        if (preFactor && preFactor > 1n && preFactor < nBig) {
+          const other = nBig / preFactor;
+          const sortedBig = preFactor <= other ? [preFactor, other] : [other, preFactor];
+          const sorted = sortedBig.map(v => v.toString());
+          const durationMs = Math.max(1, Date.now() - runStartedAt);
+          const safeOps = Math.max(1, preOps);
+          cacheFactorization(N, sorted[0], sorted[1], sorted, preMethod);
+          setWorkerActive(false);
+          setCpuUsage(0);
+          setChronosSteps(safeOps);
+          setUnifiedRace({
+            status: 'success',
+            winningEngine: preMethod,
+            factors: sorted,
+            verifiedProduct: sortedBig[0] * sortedBig[1] === nBig,
+            verifiedPrimes: isProbablePrimeBig(sortedBig[0], 10) && isProbablePrimeBig(sortedBig[1], 10),
+            elapsedMs: durationMs,
+            totalOperations: safeOps
+          });
+          setHgsTrace(prev => prev ? {
+            ...prev,
+            stage: 'success',
+            duration: durationMs,
+            factorTree: makeTree(sortedBig[0], sortedBig[1])
+          } : prev);
+          addLog(`✅ ${t.factorizationSuccess} (${preMethod} · ${durationMs}ms · ${safeOps.toLocaleString()} ops)`);
+          addLog(`Prime Factors: ${sorted.join(' × ')}`);
+          setSimState(prev => ({
+            ...prev,
+            status: 'success',
+            solution: { x: 'Identified', y: 'Identified', factor1: sorted[0], factor2: sorted[1], allFactors: sorted } as any,
+            executionTime: durationMs / 1000,
+            cycles: safeOps
+          }));
+          return;
+        }
+      }
+
       // Worker Pool Configuration:
-      // In Unified Chronos v4 mode (<=220b): 1 ECM/p±1 Worker + 1 CFRAC Worker + (N-2) Chronos SIQS Workers sharing ONE GF(2) Matrix!
-      // In Unified Chronos v4 mode (>220b): All workers race REDC ECM + p-1 + p+1 with 500d Zeta spectral seeds.
-      // In standalone CFRAC mode: All effectiveWorkerCount workers race distinct KS multipliers into ONE shared Union GF(2) Matrix!
-      const useSiqsUnified = isChronos && nBitsVal <= 220;
+      // In Unified Chronos v4 mode (<=272b): 1 ECM/p±1 Worker + 1 CFRAC Worker + HGS SIQS Worker(s) + Chronos SIQS Workers sharing ONE GF(2) Matrix!
+      // In Unified Chronos v4 mode (>272b): All workers race REDC ECM + p-1 + p+1 with 500d Zeta spectral seeds.
+      // In standalone CFRAC or HGS mode: All effectiveWorkerCount CPU workers race into ONE shared Union GF(2) Matrix!
+      const useSiqsUnified = isChronos && nBitsVal <= 272;
       const numWorkers = isChronos
-        ? (useSiqsUnified ? Math.max(3, effectiveWorkerCount) : effectiveWorkerCount)
-        : (isCfrac ? Math.max(1, effectiveWorkerCount) : 1);
+        ? (useSiqsUnified ? Math.max(4, effectiveWorkerCount) : effectiveWorkerCount)
+        : ((isCfrac || isHgs) ? Math.max(1, effectiveWorkerCount) : 1);
       workersRef.current = [];
 
       const chronosBlob = new Blob([CHRONOS_WORKER_CODE], { type: 'application/javascript' });
@@ -741,8 +1100,15 @@ const App: React.FC = () => {
         workerUrlsRef.current.push(cfracUrl);
       }
 
+      let hgsUrl = '';
+      if (isHgs || useSiqsUnified) {
+        const hgsBlob = new Blob([HGS_WORKER_CODE], { type: 'application/javascript' });
+        hgsUrl = URL.createObjectURL(hgsBlob);
+        workerUrlsRef.current.push(hgsUrl);
+      }
+
       let fallbackStrategyUrl = chronosUrl;
-      if (!isChronos && !isCfrac) {
+      if (!isChronos && !isCfrac && !isHgs) {
         let code = CHRONOS_WORKER_CODE;
         if (activeStrat === 'unbounded-qs') code = UNBOUNDED_QS_WORKER_CODE;
         else if (activeStrat === 'zeta') code = ZETA_WORKER_CODE;
@@ -757,60 +1123,113 @@ const App: React.FC = () => {
         workerUrlsRef.current.push(fallbackStrategyUrl);
       }
 
-      const workerRoles: Array<'ecm' | 'siqs' | 'cfrac'> = Array.from({ length: numWorkers }, (_, idx) => {
+      const workerRoles: Array<'ecm' | 'siqs' | 'cfrac' | 'hgs'> = Array.from({ length: numWorkers }, (_, idx) => {
         if (isCfrac) return 'cfrac';
+        if (isHgs) return 'hgs';
         if (!isChronos) return 'siqs';
         if (!useSiqsUnified) return 'ecm';
         if (idx === 0) return 'ecm';
-        if (idx === 1) return 'cfrac';
-        return 'siqs';
+        if (numWorkers >= 4 && idx === 1) return 'cfrac';
+        return 'hgs';
       });
       const ecmWorkerCount = workerRoles.filter(r => r === 'ecm').length;
 
       setWorkerThreadsStats(
         workerRoles.map((roleVal, idx) => ({
           id: idx,
-          role: roleVal === 'cfrac' ? 'siqs' : roleVal,
+          role: roleVal,
           curves: 0,
           polys: 0,
           relations: 0,
-          stage: roleVal === 'cfrac' ? 'CFRAC Fast-2LP √(kN) → GF(2)' : (roleVal === 'ecm' ? 'Zeta REDC ECM + p±1' : 'SIQS v4 → GF(2)'),
+          stage: roleVal === 'cfrac'
+            ? 'CFRAC Fast-2LP √(kN) → GF(2)'
+            : roleVal === 'hgs'
+            ? 'HGS SIQS+Gray+1LP → GF(2)'
+            : roleVal === 'ecm'
+            ? 'Zeta REDC ECM + p±1'
+            : 'SIQS v4 → GF(2)',
           active: true
         }))
       );
 
-      const ksResult = useSiqsUnified
-        ? selectKnuthSchroeppelMultiplier(nBig)
-        : (isCfrac ? (() => {
-            const rankedRes = selectRankedKnuthSchroeppelMultipliers(nBig, 1);
-            return { k: rankedRes.ranked[0] ?? 1, directFactor: rankedRes.directFactor };
-          })() : { k: 1 });
-      if (ksResult.directFactor && ksResult.directFactor > 1n && ksResult.directFactor < nBig) {
-        const f1 = ksResult.directFactor;
+      const rankedKsRes = (useSiqsUnified || isCfrac || isHgs)
+        ? selectRankedKnuthSchroeppelMultipliers(nBig, Math.max(18, numWorkers + 12))
+        : { ranked: [1], directFactor: undefined };
+
+      const directKsFactor = rankedKsRes.directFactor;
+      const zetaGuide: ZetaGf2GuidanceResult | null = (!directKsFactor && (useSiqsUnified || isCfrac))
+        ? evaluateZetaGuidanceForGf2(nBig, rankedKsRes.ranked, localZetaSeeds)
+        : null;
+
+      if (zetaGuide && zetaGuide.zetaSeeds.length > 0 && localZetaSeeds.length === 0) {
+        setBd500ZetaSeeds(zetaGuide.zetaSeeds);
+      }
+
+      const instantFactor =
+        (directKsFactor && directKsFactor > 1n && directKsFactor < nBig)
+          ? directKsFactor
+          : (zetaGuide?.directFactor && zetaGuide.directFactor > 1n && zetaGuide.directFactor < nBig
+              ? zetaGuide.directFactor
+              : null);
+
+      if (instantFactor) {
+        const f1 = instantFactor;
         const f2 = nBig / f1;
         const sorted = [f1, f2].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
+        const winLabel = directKsFactor ? 'Knuth-Schroeppel Multiplier GCD' : 'Zeta Spectral Seed Micro-Sweep';
+        cacheFactorization(N, sorted[0], sorted[1], sorted, winLabel);
         const durationMs = Math.max(1, Date.now() - runStartedAt);
         setWorkerActive(false);
+        setIsUniversalExpPending(false);
         setCpuUsage(0);
+        if (universalExpRunRef.current && stopStage1OnUniversalExpRef.current) {
+          setUniversalExpStage1Halted(true);
+          setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+          const rep = computeUniversalExponentReport(N, 'standard', 0.258, undefined, undefined, { stopStage1BeforeFactors: true });
+          addLog(`⏹ تم إيقاف المرحلة 1 قبل عرض العوامل فور تحديد الأس العام λ(N) (${durationMs}ms).`);
+          addLog(`λ(N) = ${rep.lambdaN}`);
+          setSimState(prev => ({ ...prev, status: 'idle', solution: null }));
+          return;
+        }
         setUnifiedRace({
           status: 'success',
-          winningEngine: 'Knuth-Schroeppel Multiplier GCD',
+          winningEngine: winLabel,
           factors: sorted,
           verifiedProduct: f1 * f2 === nBig,
           verifiedPrimes: sorted.every(v => isProbablePrimeBig(BigInt(v), 10)),
           elapsedMs: durationMs,
-          totalOperations: scoutOps + 64
+          totalOperations: scoutOps + 64,
+          noteAr: zetaGuide?.directFactor ? zetaGuide.summaryAr : undefined
         });
-        addLog(`✅ ${t.factorizationSuccess} (KS Multiplier GCD · ${durationMs}ms)`);
+        addLog(`✅ ${t.factorizationSuccess} (${winLabel} · ${durationMs}ms)`);
         addLog(`Prime Factors: ${sorted.join(' × ')}`);
+        setSimState(prev => ({
+          ...prev,
+          status: 'success',
+          solution: {
+            x: "Identified",
+            y: "Identified",
+            factor1: sorted[0],
+            factor2: sorted[1],
+            allFactors: sorted
+          } as any,
+          executionTime: durationMs / 1000,
+          cycles: scoutOps + 64
+        }));
         return;
       }
 
-      const optK = ksResult.k;
+      if (zetaGuide) {
+        addLog(`>> [Zeta→GF(2)] ${zetaGuide.summaryAr}`);
+      }
+
+      const optK = zetaGuide ? zetaGuide.selectedK : (rankedKsRes.ranked[0] ?? 1);
       const siqsM = BigInt(optK) * nBig;
-      const rankedKsAll = isCfrac
-        ? selectRankedKnuthSchroeppelMultipliers(nBig, Math.max(18, numWorkers + 12)).ranked
-        : [optK, ...[1, 3, 5, 7, 11, 13, 15, 17, 19, 21, 23, 29].filter(v => v !== optK)];
+      const rankedKsAll = zetaGuide
+        ? zetaGuide.cfracMultipliers
+        : (isCfrac
+            ? rankedKsRes.ranked
+            : [optK, ...[1, 3, 5, 7, 11, 13, 17, 19, 21, 23, 29].filter(v => v !== optK)]);
       const CFRAC_MULTIPLIERS = rankedKsAll.length > 0 ? rankedKsAll : [1, 3, 5, 7, 11, 13, 17];
 
       const cfracUnionFb: CfracSharedUnionFb | null = isCfrac
@@ -823,39 +1242,97 @@ const App: React.FC = () => {
       let nextCfracQueueIdx = numWorkers;
       let exhaustedCfracWorkers = 0;
 
-      // Shared Factor Base & Single+Double Large Prime Pool so all CFRAC workers (or SIQS + CFRAC) share ONE GF(2) Matrix
+      // Shared Factor Base & Single+Double Large Prime Pool so all CFRAC/HGS/SIQS workers share ONE GF(2) Matrix
       const activeFb = isCfrac && cfracUnionFb
         ? { primes: cfracUnionFb.sharedPrimes, roots: [] as number[], logs: [] as number[], largePrimeBound: cfracUnionFb.largePrimeBound }
-        : (useSiqsUnified ? buildMpqsFactorBase(nBig, siqsM) : { primes: [], roots: [], logs: [], largePrimeBound: 0 });
+        : ((useSiqsUnified || isHgs) ? buildMpqsFactorBase(nBig, siqsM, effectiveWorkerCount) : { primes: [], roots: [], logs: [], largePrimeBound: 0 });
       const lpPool = new SingleLargePrimePool(nBig, activeFb.primes);
-      const targetRelations = activeFb.primes.length + (nBitsVal >= 160 ? 14 : (isCfrac ? 6 : 10));
+      const targetRelations = activeFb.primes.length + (nBitsVal >= 260 ? 24 : (nBitsVal >= 160 ? 14 : (isCfrac ? 6 : 10)));
+      let targetRelationsCurrent = targetRelations;
+      let gf2Cursor = { fulls: 0, tree: 0, cycles: 0 };
       const v4Diag = computeV4SieveDiagnostics();
+      const zetaWidthScale = zetaGuide ? zetaGuide.sieveHalfWidthScale : 1.0;
       const activeSieveWeights = sieveMode === 'v4-fallback'
-        ? { rowMedians: v4Diag.rowMedians, colPriors: v4Diag.colPriors6 }
-        : null;
-      const totalSiqsWorkers = Math.max(1, workerRoles.filter(r => r === 'siqs').length);
+        ? { rowMedians: v4Diag.rowMedians, colPriors: v4Diag.colPriors6, zetaWidthScale }
+        : (zetaWidthScale !== 1.0 ? { zetaWidthScale } : null);
+      const totalSiqsWorkers = Math.max(0, workerRoles.filter(r => r === 'siqs').length);
+      const totalHgsWorkers = workerRoles.filter(r => r === 'hgs').length;
+      const totalPolyWorkers = Math.max(1, totalSiqsWorkers + totalHgsWorkers);
       const workerPolysMap = new Array(numWorkers).fill(0);
       const workerOpsMap = new Array(numWorkers).fill(0);
+      const workerScannedMap = new Array(numWorkers).fill(0);
+      const workerSkippedMap = new Array(numWorkers).fill(0);
+      const workerBlocksMap = new Array(numWorkers).fill(0);
+      const workerSqufofMap = new Array(numWorkers).fill(0);
       let krylovOpsAccum = 0;
       let siqsRelCount = 0;
+      let hgsRelCount = 0;
       let cfracRelCount = 0;
       let matrixSolves = 0;
       let lastMatrixSolveLen = 0;
 
+      if (useSiqsUnified || isHgs || isCfrac) {
+        setGf2Monitor(prev => ({
+          ...prev,
+          totalCols: activeFb.primes.length + 1
+        }));
+      }
+
+      const getActiveElapsedSec = () => {
+        const curPause = pauseStartedAtRef.current !== null ? Math.max(0, Date.now() - pauseStartedAtRef.current) : 0;
+        return Math.max(0.05, (Date.now() - runStartedAt - totalPausedMsRef.current - curPause) / 1000);
+      };
+
+      const dispatchPauseToSievers = (paused: boolean, reason: 'gf2' | 'manual' | null) => {
+        if (paused) {
+          if (pauseStartedAtRef.current === null) pauseStartedAtRef.current = Date.now();
+        } else if (!manualPauseRef.current && pauseStartedAtRef.current !== null) {
+          totalPausedMsRef.current += Math.max(0, Date.now() - pauseStartedAtRef.current);
+          pauseStartedAtRef.current = null;
+        }
+        const msgType = paused ? 'pause' : 'resume';
+        workersRef.current.forEach(w => {
+          try {
+            w.postMessage({ type: msgType });
+          } catch {}
+        });
+        setWorkerThreadsStats(prev =>
+          prev.map(s => ({
+            ...s,
+            paused,
+            pauseReason: paused ? reason : null
+          }))
+        );
+      };
+
+      const formatUnifiedWinLabel = (bwMethod: string) => {
+        const parts: string[] = [];
+        if (siqsRelCount > 0) parts.push('SIQS');
+        if (hgsRelCount > 0) parts.push('HGS');
+        if (cfracRelCount > 0) parts.push('CFRAC');
+        if (parts.length >= 2 || hgsRelCount > 0 || cfracRelCount > 0) {
+          return `GF(2) الموحد (${parts.join(' + ')} · ${bwMethod})`;
+        }
+        return `Chronos SIQS v4 (${bwMethod})`;
+      };
+
       const getCurrentTotalOps = () =>
         scoutOps + krylovOpsAccum + workerOpsMap.reduce((a, b) => a + b, 0);
 
-      if (isChronos) {
+      if (isChronos || isHgs || isCfrac) {
         raceTimerRef.current = window.setInterval(() => {
+          const liveOps = getCurrentTotalOps();
+          setChronosSteps(liveOps);
           setUnifiedRace(prev =>
             prev.status === 'racing'
               ? {
                   ...prev,
                   elapsedMs: Date.now() - runStartedAt,
-                  totalOperations: getCurrentTotalOps(),
-                  sharedGf2Stats: useSiqsUnified
+                  totalOperations: liveOps,
+                  sharedGf2Stats: (useSiqsUnified || isHgs || isCfrac)
                     ? {
                         siqsRelations: siqsRelCount,
+                        hgsRelations: hgsRelCount,
                         cfracRelations: cfracRelCount,
                         totalFullRelations: lpPool.fullCount,
                         targetRelations,
@@ -901,7 +1378,7 @@ const App: React.FC = () => {
           factorBaseSize: activeFb.primes.length,
           matrixSolves: 0,
           lastSource: useSiqsUnified
-            ? 'Unified GF(2) (SIQS + CFRAC)'
+            ? 'Unified GF(2) (SIQS + HGS + CFRAC)'
             : 'Parallel Zeta-Seeded REDC ECM + p±1',
           partialCount: 0,
           lpCollisions: 0,
@@ -910,9 +1387,35 @@ const App: React.FC = () => {
         });
         addLog(
           useSiqsUnified
-            ? `>> Chronos v4 Unified Race: ${ecmWorkerCount} Zeta REDC ECM/p±1 + 1 CFRAC + ${totalSiqsWorkers} SIQS v4 (1LP+2LP, k=${optK}) | Shared GF(2) QR-FB=${activeFb.primes.length}.`
-            : `>> Chronos v4 Unified Race (>220b): ${numWorkers} Parallel Zeta-Seeded Montgomery REDC ECM + p−1/p+1 Workers Active.`
+            ? `>> Chronos v4 Unified Race: ${ecmWorkerCount} Zeta REDC ECM/p±1 + 1 CFRAC + ${totalHgsWorkers} HGS (Gray+1LP/2LP) + ${totalSiqsWorkers} SIQS v4 (k=${optK}) | Shared GF(2) QR-FB=${activeFb.primes.length}.`
+            : `>> Chronos v4 Unified Race (>272b): ${numWorkers} Parallel Zeta-Seeded Montgomery REDC ECM + p−1/p+1 Workers Active.`
         );
+      } else if (isHgs) {
+        const fbPreview = activeFb.primes.length > 220
+          ? [-1, ...activeFb.primes.slice(0, 180), activeFb.primes[activeFb.primes.length - 1]]
+          : [-1, ...activeFb.primes];
+        setHgsTrace(prev => prev ? {
+          ...prev,
+          stage: 'sieving',
+          stageMessage: `32KB Working-Set Tiled SIQS + 17b Bucket + SQUFOF 2LP across ${numWorkers} Workers...`,
+          factorBase: fbPreview,
+          factorBaseSize: activeFb.primes.length,
+          polynomial: `SIQS Q(x) = A x² + 2Bx + C (k=${optK}, 32KB-Tiled + SQUFOF ×${numWorkers})`,
+          targetSmooth: targetRelations,
+          activeWorkers: numWorkers
+        } : prev);
+        setGf2Stats({
+          collected: 0,
+          target: targetRelations,
+          factorBaseSize: activeFb.primes.length,
+          matrixSolves: 0,
+          lastSource: `Parallel HGS ×${numWorkers} (32KB-Tiled + SQUFOF)`,
+          partialCount: 0,
+          lpCollisions: 0,
+          krylovSteps: 0,
+          coreShape: ''
+        });
+        addLog(`>> Parallel HGS ×${numWorkers} Workers Active: k=${optK}, QR-FB=${activeFb.primes.length}, L_max=${activeFb.largePrimeBound.toLocaleString()}, 32KB-Tiled Arrays + Piecewise Log + SQUFOF 2LP → markowitz-core.`);
       } else if (isZeta) {
         addLog(`>> Zeta 160d Worker Active (48 Verified Riemann Zeros + Batch-GCD + Hart 4kN + REDC ECM B2).`);
       }
@@ -929,43 +1432,348 @@ const App: React.FC = () => {
           raceTimerRef.current = null;
         }
         setWorkerActive(false);
+        setIsUniversalExpPending(false);
         setCpuUsage(0);
         workersRef.current.forEach(w => w.terminate());
         workersRef.current = [];
         workerUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
         workerUrlsRef.current = [];
-        setWorkerThreadsStats(prev => prev.map(s => ({ ...s, active: false, stage: winningEngineLabel })));
-
-        if (isChronos) {
-          setUnifiedRace({
-            status: 'success',
-            winningEngine: winningEngineLabel,
-            factors: sortedFactors,
-            verifiedProduct: sortedFactors.reduce((acc, v) => acc * BigInt(v), 1n) === nBig,
-            verifiedPrimes: sortedFactors.every(v => isProbablePrimeBig(BigInt(v), 10)),
-            elapsedMs: durationMs,
-            totalOperations: totalOps,
-            sharedGf2Stats: useSiqsUnified
-              ? {
-                  siqsRelations: siqsRelCount,
-                  cfracRelations: cfracRelCount,
-                  totalFullRelations: lpPool.fullCount,
-                  targetRelations,
-                  lpCollisions: lpPool.collisionsCount,
-                  matrixSolves
-                }
-              : undefined,
-            noteAr
-          });
+        if (gf2WorkerRef.current) {
+          gf2WorkerRef.current.terminate();
+          gf2WorkerRef.current = null;
         }
+        gf2InFlightRef.current = false;
+        manualPauseRef.current = false;
+        pauseStartedAtRef.current = null;
+        totalPausedMsRef.current = 0;
+        setWorkerThreadsStats(prev => prev.map(s => ({ ...s, active: false, paused: false, pauseReason: null, stage: winningEngineLabel })));
+        setGf2Monitor(prev => ({
+          ...prev,
+          solverStage: 'solved',
+          offThreadActive: false,
+          sieversPausedForGf2: false,
+          manualPaused: false
+        }));
+
+        if (sortedFactors.length >= 2) {
+          cacheFactorization(
+            N,
+            sortedFactors[0],
+            (nBig / BigInt(sortedFactors[0])).toString(),
+            sortedFactors,
+            winningEngineLabel
+          );
+        }
+
+        if (universalExpRunRef.current && stopStage1OnUniversalExpRef.current) {
+          setUniversalExpStage1Halted(true);
+          setUnifiedRace({
+            status: 'idle',
+            winningEngine: null,
+            factors: [],
+            verifiedProduct: false,
+            verifiedPrimes: false,
+            elapsedMs: 0,
+            totalOperations: 0
+          });
+          return;
+        }
+
+        const safeTotalOps = Math.max(1, totalOps, getCurrentTotalOps());
+        setChronosSteps(safeTotalOps);
+
+        setUnifiedRace({
+          status: 'success',
+          winningEngine: winningEngineLabel,
+          factors: sortedFactors,
+          verifiedProduct: sortedFactors.reduce((acc, v) => acc * BigInt(v), 1n) === nBig,
+          verifiedPrimes: sortedFactors.every(v => isProbablePrimeBig(BigInt(v), 10)),
+          elapsedMs: durationMs,
+          totalOperations: safeTotalOps,
+          sharedGf2Stats: (useSiqsUnified || isHgs || isCfrac)
+            ? {
+                siqsRelations: siqsRelCount,
+                hgsRelations: hgsRelCount,
+                cfracRelations: cfracRelCount,
+                totalFullRelations: lpPool.fullCount,
+                targetRelations: targetRelationsCurrent,
+                lpCollisions: lpPool.collisionsCount,
+                matrixSolves
+              }
+            : undefined,
+          noteAr
+        });
+      };
+
+      const gf2SolveContextMap = new Map<number, { sourceKind: 'chronos' | 'hgs' | 'cfrac'; workerK?: number; collectedAtTrigger: number }>();
+
+      const setupDedicatedGf2Worker = () => {
+        if (!(useSiqsUnified || isHgs || isCfrac)) return;
+        const gf2w = new Worker(new URL('./gf2Worker.ts', import.meta.url), { type: 'module' });
+        gf2WorkerRef.current = gf2w;
+        gf2w.postMessage({ type: 'init', nStr: N, fbPrimes: activeFb.primes });
+        gf2w.onmessage = (ev: MessageEvent) => {
+          if (solutionFound) return;
+          const msg = ev.data;
+          if (!msg) return;
+
+          if (msg.type === 'gf2_stage') {
+            if (msg.solveId !== gf2SolveSeqRef.current) return;
+            setGf2Monitor(prev => ({
+              ...prev,
+              solverStage: msg.stage === 'materializing_bfs' ? 'materializing_bfs' : 'markowitz_sge',
+              materializedCyclesCount: typeof msg.builtCycles === 'number' ? msg.builtCycles : prev.materializedCyclesCount,
+              totalRows: typeof msg.totalRows === 'number' ? msg.totalRows : prev.totalRows,
+              totalCols: typeof msg.totalCols === 'number' ? msg.totalCols : prev.totalCols
+            }));
+          } else if (msg.type === 'gf2_solved') {
+            if (msg.solveId !== gf2SolveSeqRef.current) return;
+            const ctxMeta = gf2SolveContextMap.get(msg.solveId);
+            gf2SolveContextMap.delete(msg.solveId);
+            gf2InFlightRef.current = false;
+
+            if (msg.redcBenchmark) {
+              setRedcSpeedupInfo(msg.redcBenchmark);
+            }
+            krylovOpsAccum += Math.max(64, (msg.krylovSteps || 1) * 64);
+
+            setGf2Stats(prev => ({
+              ...prev,
+              matrixSolves,
+              krylovSteps: msg.krylovSteps,
+              coreShape: `${msg.coreRows}×${msg.coreCols}`,
+              solverMethod: msg.methodUsed
+            }));
+
+            setGf2Monitor(prev => ({
+              ...prev,
+              lastTimings: msg.stageTimings || prev.lastTimings,
+              materializedCyclesCount: typeof msg.builtCycles === 'number' ? msg.builtCycles : prev.materializedCyclesCount,
+              pendingCyclesCount: typeof msg.remainingCycles === 'number' ? msg.remainingCycles : prev.pendingCyclesCount,
+              totalRows: msg.totalRows || prev.totalRows,
+              totalCols: msg.totalCols || prev.totalCols
+            }));
+
+            if (isHgs) {
+              setHgsTrace(prev => prev ? {
+                ...prev,
+                stage: 'congruence',
+                matrixDimensions: {
+                  rows: msg.totalRows || 0,
+                  cols: msg.totalCols || (activeFb.primes.length + 1),
+                  dependencies: msg.dependenciesTested || 0
+                }
+              } : prev);
+            }
+
+            const f1 = msg.factorStr ? BigInt(msg.factorStr) : null;
+            if (f1 && f1 > 1n && f1 < nBig) {
+              const f2 = nBig / f1;
+              if (isProbablePrimeBig(f1, 10) && isProbablePrimeBig(f2, 10)) {
+                solutionFound = true;
+                const sorted = [f1, f2].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
+                const durationMs = Math.max(1, Date.now() - runStartedAt);
+                const elapsed = durationMs / 1000;
+                const totalPolys = workerPolysMap.reduce((a, b) => a + b, 0);
+                const totalCfracStepsNow = workerOpsMap.reduce((acc, v) => acc + Math.floor(v / 4), 0);
+                const finalOps = getCurrentTotalOps();
+                const collected = ctxMeta?.collectedAtTrigger ?? lpPool.fullCount;
+                const sourceKind = ctxMeta?.sourceKind ?? 'chronos';
+                const workerK = ctxMeta?.workerK ?? activeCfracK;
+                const methodLabel = msg.methodUsed || 'markowitz-core';
+                const winLabel = sourceKind === 'hgs' && isHgs
+                  ? `HGS Parallel ×${numWorkers} (128-Bias + SQUFOF + ${methodLabel})`
+                  : (sourceKind === 'cfrac' && !isChronos
+                      ? `Parallel CFRAC ×${numWorkers} (k=${workerK}) · ${methodLabel}`
+                      : formatUnifiedWinLabel(methodLabel));
+
+                setBenchmarkHistory(prev => [
+                  {
+                    mode: sourceKind === 'cfrac' && !isChronos ? 'cfrac' : sieveMode,
+                    bits: nBitsVal,
+                    n: N,
+                    durationMs,
+                    relationsCollected: collected,
+                    polysProcessed: sourceKind === 'cfrac' && !isChronos ? totalCfracStepsNow : totalPolys,
+                    relationsPerSec: Number((collected / getActiveElapsedSec()).toFixed(2)),
+                    lpCollisions: lpPool.collisionsCount,
+                    solveMethod: sourceKind === 'cfrac' && !isChronos ? winLabel : methodLabel,
+                    verified: f1 * f2 === nBig
+                  },
+                  ...prev
+                ].slice(0, 12));
+
+                if (isHgs) {
+                  setHgsTrace(prev => prev ? {
+                    ...prev,
+                    stage: 'success',
+                    duration: durationMs,
+                    congruence: {
+                      X: 'markowitz-core GF(2) Product',
+                      Y: 'Square-Root Congruence',
+                      diff: `|X - Y| mod N (${msg.dependenciesTested} deps)`,
+                      g1: sorted[0],
+                      g2: sorted[1],
+                      factor1: sorted[0],
+                      factor2: sorted[1],
+                      duration: durationMs
+                    },
+                    factorTree: {
+                      value: nBig.toString(),
+                      bits: nBitsVal,
+                      isPrime: false,
+                      left: { value: sorted[0], bits: BigInt(sorted[0]).toString(2).length, isPrime: true, role: 'factor_p' },
+                      right: { value: sorted[1], bits: BigInt(sorted[1]).toString(2).length, isPrime: true, role: 'factor_q' }
+                    }
+                  } : prev);
+                }
+
+                const noteAr = isHgs
+                  ? `حُسمت مصفوفة HGS في Worker مستقل (${numWorkers} أنوية · ${collected} علاقة · ${lpPool.collisionsCount} دورة SQUFOF/LP).`
+                  : (isChronos
+                      ? `حُسمت مصفوفة GF(2) الموحدة في Worker مستقل (${siqsRelCount} SIQS + ${hgsRelCount} HGS + ${cfracRelCount} CFRAC).`
+                      : undefined);
+
+                finishUnifiedSuccess(winLabel, sorted, durationMs, finalOps, noteAr);
+
+                if (universalExpRunRef.current && stopStage1OnUniversalExpRef.current) {
+                  const rep = computeUniversalExponentReport(N, 'standard', 0.258, undefined, undefined, { stopStage1BeforeFactors: true });
+                  addLog(`⏹ تم إيقاف المرحلة 1 قبل عرض العوامل فور تحديد الأس العام λ(N) (${durationMs}ms).`);
+                  addLog(`λ(N) = ${rep.lambdaN}`);
+                  setSimState(prev => ({ ...prev, status: 'idle', solution: null }));
+                  return;
+                }
+
+                const st = msg.stageTimings;
+                if (st) {
+                  addLog(`>> [GF(2) Worker] BFS=${st.bfsBuildMs}ms (${st.builtCycles} cycles) · Markowitz=${st.markowitzMs}ms · Solve=${st.linearSolveMs}ms · Sqrt=${st.sqrtMs}ms`);
+                }
+                addLog(`✅ ${t.factorizationSuccess} (${winLabel} · ${durationMs}ms · ${finalOps.toLocaleString()} ops)`);
+                addLog(`Prime Factors: ${sorted.join(' × ')}`);
+                addLog(`Verification (Product == N): ${f1 * f2 === nBig}`);
+
+                setSimState(prev => ({
+                  ...prev,
+                  status: 'success',
+                  solution: {
+                    x: 'Identified',
+                    y: 'Identified',
+                    factor1: sorted[0],
+                    factor2: sorted[1],
+                    allFactors: sorted
+                  } as any,
+                  executionTime: elapsed,
+                  cycles: finalOps
+                }));
+                return;
+              } else {
+                addLog(`⚡ GF(2) Worker split composite factor (${f1.toString().slice(0, 14)}...) — collecting more relations...`);
+              }
+            }
+
+            // No prime factor found yet — expand target and resume sievers
+            targetRelationsCurrent = Math.max(targetRelationsCurrent, lpPool.fullCount) + (nBitsVal >= 260 ? 24 : (nBitsVal >= 160 ? 14 : 8));
+            setGf2Stats(prev => ({ ...prev, target: targetRelationsCurrent }));
+            setGf2Monitor(prev => ({
+              ...prev,
+              solverStage: 'idle',
+              offThreadActive: false,
+              sieversPausedForGf2: false
+            }));
+            if (!manualPauseRef.current) {
+              dispatchPauseToSievers(false, null);
+            }
+          } else if (msg.type === 'gf2_error') {
+            if (msg.solveId !== gf2SolveSeqRef.current) return;
+            gf2InFlightRef.current = false;
+            setGf2Monitor(prev => ({
+              ...prev,
+              solverStage: 'idle',
+              offThreadActive: false,
+              sieversPausedForGf2: false,
+              lastSolveError: msg.message || 'GF(2) worker error'
+            }));
+            addLog(`⚠ GF(2) Worker: ${msg.message || 'Error'} — resuming sievers.`);
+            if (!manualPauseRef.current) {
+              dispatchPauseToSievers(false, null);
+            }
+          }
+        };
+        gf2w.onerror = () => {
+          gf2InFlightRef.current = false;
+          setGf2Monitor(prev => ({
+            ...prev,
+            solverStage: 'idle',
+            offThreadActive: false,
+            sieversPausedForGf2: false,
+            lastSolveError: 'GF(2) worker crashed'
+          }));
+          if (!manualPauseRef.current) {
+            dispatchPauseToSievers(false, null);
+          }
+        };
+      };
+
+      setupDedicatedGf2Worker();
+
+      const triggerOffThreadGf2Solve = (sourceKind: 'chronos' | 'hgs' | 'cfrac', workerK?: number) => {
+        if (solutionFound || gf2InFlightRef.current || !gf2WorkerRef.current) return;
+        const collected = lpPool.fullCount;
+        const solveDelta = sourceKind === 'cfrac'
+          ? (nBitsVal >= 120 ? 10 : 4)
+          : (nBitsVal >= 260 ? 24 : (nBitsVal >= 160 ? 16 : 6));
+        if (collected < targetRelationsCurrent) return;
+        if (matrixSolves > 0 && collected - lastMatrixSolveLen < solveDelta) return;
+
+        lastMatrixSolveLen = collected;
+        matrixSolves++;
+        gf2InFlightRef.current = true;
+        const solveId = ++gf2SolveSeqRef.current;
+        gf2SolveContextMap.set(solveId, { sourceKind, workerK, collectedAtTrigger: collected });
+
+        dispatchPauseToSievers(true, 'gf2');
+        setGf2Monitor(prev => ({
+          ...prev,
+          solverStage: 'materializing_bfs',
+          offThreadActive: true,
+          sieversPausedForGf2: true,
+          solveCount: matrixSolves,
+          directFullCount: lpPool.directFullCount,
+          partialCount: lpPool.partialCount,
+          pendingCyclesCount: lpPool.pendingCyclesCount,
+          lastSolveError: null
+        }));
+
+        const delta = lpPool.exportIncrementalPayload(gf2Cursor);
+        gf2Cursor = delta.nextCursor;
+        gf2WorkerRef.current.postMessage({
+          type: 'solve',
+          solveId,
+          nStr: N,
+          fbPrimes: activeFb.primes,
+          fulls: delta.fulls,
+          treeEdges: delta.treeEdges,
+          cycleEdges: delta.cycleEdges
+        });
       };
 
       const handleWorkerMessage = (e: MessageEvent, currentWorkerId: number) => {
         if (solutionFound) return;
         const { type, steps, total, factor, message, nBits, round, features, attempts, curveAdds, modMuls, curveInfo, duration, workerId = currentWorkerId } = e.data;
         
-        // Chronos v4 Unified Race events
-        if (type === 'chronos_redc_benchmark') {
+        if (type === 'worker_pause_ack') {
+          setWorkerThreadsStats(prev => {
+            const next = [...prev];
+            if (next[workerId]) {
+              next[workerId] = {
+                ...next[workerId],
+                paused: Boolean(e.data.paused),
+                pauseReason: e.data.paused ? (gf2InFlightRef.current ? 'gf2' : 'manual') : null
+              };
+            }
+            return next;
+          });
+        } else if (type === 'chronos_redc_benchmark') {
           setRedcSpeedupInfo({
             active: Boolean(e.data.active),
             backend: e.data.backend,
@@ -978,6 +1786,7 @@ const App: React.FC = () => {
           });
         } else if (type === 'chronos_suyama_stage') {
           workerOpsMap[workerId] += 600;
+          setChronosSteps(getCurrentTotalOps());
           const phaseLabel = e.data.stagePhase === 'stage2-b2'
             ? `B2 ${e.data.b2ProgressPct ?? 0}% (${e.data.curveFamily === 'montgomery' ? 'Mont' : 'Suy'})`
             : (e.data.sigma ? String(e.data.sigma) : `B1=${Math.round(e.data.b1Bound / 1000)}k`);
@@ -1014,6 +1823,7 @@ const App: React.FC = () => {
         } else if (type === 'chronos_relations_batch') {
           const batch: SmoothRelation[] = e.data.relations || [];
           workerOpsMap[workerId] += 1800;
+          setChronosSteps(getCurrentTotalOps());
           if (e.data.targetN === N && batch.length > 0 && useSiqsUnified) {
             const { addedFull, addedPartial, newCollisions } = lpPool.ingestBatch(batch);
             siqsRelCount += addedFull + newCollisions;
@@ -1027,6 +1837,10 @@ const App: React.FC = () => {
                     ...next[workerId],
                     role: 'siqs',
                     polys: workerPolysMap[workerId],
+                    polysPerSec: e.data.polysPerSec ?? next[workerId].polysPerSec,
+                    candsTested: e.data.candsTested ?? next[workerId].candsTested,
+                    squfofSplits: e.data.squfof2Lp ?? next[workerId].squfofSplits,
+                    lastBatchMs: e.data.batchDurationMs ?? next[workerId].lastBatchMs,
                     relations: (next[workerId].relations || 0) + addedFull + addedPartial,
                     stage: newCollisions > 0 ? `SIQS (+${newCollisions} LP-Cycle)` : (sieveMode === 'v4-fallback' ? 'SIQS v4 Fast-2LP' : 'SIQS Vanilla'),
                     active: true
@@ -1036,103 +1850,240 @@ const App: React.FC = () => {
               });
 
               const collected = lpPool.fullCount;
-              const elapsedSecNow = Math.max(0.05, (Date.now() - runStartedAt) / 1000);
+              const elapsedSecNow = getActiveElapsedSec();
               const totalPolysNow = workerPolysMap.reduce((a, b) => a + b, 0);
               setChronosSmooth(collected);
               setGf2Stats(prev => ({
                 ...prev,
                 collected,
-                target: targetRelations,
+                target: targetRelationsCurrent,
                 factorBaseSize: activeFb.primes.length,
                 matrixSolves,
                 partialCount: lpPool.partialCount,
                 lpCollisions: lpPool.collisionsCount,
                 relationsPerSec: collected / elapsedSecNow,
                 polysProcessed: totalPolysNow,
-                lastSource: cfracRelCount > 0
-                  ? `Unified GF(2): SIQS(${siqsRelCount}) + CFRAC(${cfracRelCount})`
+                lastSource: (cfracRelCount > 0 || hgsRelCount > 0)
+                  ? `Unified GF(2): SIQS(${siqsRelCount}) + HGS(${hgsRelCount}) + CFRAC(${cfracRelCount})`
                   : `${sieveMode === 'v4-fallback' ? 'SIQS-v4' : 'Vanilla'} k=${optK} W#${workerId + 1}`
               }));
+              setGf2Monitor(prev => ({
+                ...prev,
+                directFullCount: lpPool.directFullCount,
+                partialCount: lpPool.partialCount,
+                pendingCyclesCount: lpPool.pendingCyclesCount
+              }));
 
-              // Trigger Shared Sparse GF(2) Solver once combined SIQS+CFRAC relations reach FB + margin
-              const solveDelta = nBitsVal >= 160 ? 16 : 6;
-              if (collected >= targetRelations && (collected - lastMatrixSolveLen >= solveDelta || matrixSolves === 0)) {
-                lastMatrixSolveLen = collected;
-                matrixSolves++;
-                const bwRes = solveBlockWiedemann(nBig, activeFb.primes, lpPool.getFullRelations(), lpPool.getRedcCtx());
-                if (bwRes.redcBenchmark) {
-                  setRedcSpeedupInfo(bwRes.redcBenchmark);
-                }
-                krylovOpsAccum += Math.max(64, (bwRes.krylovSteps || 1) * 64);
-                setGf2Stats(prev => ({
-                  ...prev,
-                  matrixSolves,
-                  krylovSteps: bwRes.krylovSteps,
-                  coreShape: `${bwRes.coreRows}×${bwRes.coreCols}`,
-                  solverMethod: bwRes.methodUsed
-                }));
-
-                if (bwRes.factor && bwRes.factor > 1n && bwRes.factor < nBig) {
-                  const f1 = bwRes.factor;
-                  const f2 = nBig / f1;
-                  if (isProbablePrimeBig(f1, 10) && isProbablePrimeBig(f2, 10)) {
-                    solutionFound = true;
-                    const sorted = [f1, f2].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
-                    const durationMs = Math.max(1, Date.now() - runStartedAt);
-                    const elapsed = durationMs / 1000;
-                    const totalPolys = workerPolysMap.reduce((a, b) => a + b, 0);
-                    const finalOps = getCurrentTotalOps();
-                    const winLabel = cfracRelCount > 0 && siqsRelCount > 0
-                      ? `GF(2) الموحد (SIQS + CFRAC · ${bwRes.methodUsed})`
-                      : `Chronos SIQS v4 (${bwRes.methodUsed})`;
-
-                    setBenchmarkHistory(prev => [
-                      {
-                        mode: sieveMode,
-                        bits: nBitsVal,
-                        n: N,
-                        durationMs,
-                        relationsCollected: collected,
-                        polysProcessed: totalPolys,
-                        relationsPerSec: Number((collected / (durationMs / 1000)).toFixed(2)),
-                        lpCollisions: lpPool.collisionsCount,
-                        solveMethod: bwRes.methodUsed,
-                        verified: f1 * f2 === nBig
-                      },
-                      ...prev
-                    ].slice(0, 12));
-
-                    finishUnifiedSuccess(winLabel, sorted, durationMs, finalOps, `حُسمت مصفوفة GF(2) الموحدة (${siqsRelCount} SIQS + ${cfracRelCount} CFRAC).`);
-
-                    addLog(`✅ ${t.factorizationSuccess} (${winLabel} · ${durationMs}ms · ${finalOps.toLocaleString()} ops)`);
-                    addLog(`Prime Factors: ${sorted.join(' × ')}`);
-                    addLog(`Verification (Product == N): ${f1 * f2 === nBig}`);
-
-                    setSimState(prev => ({
-                      ...prev,
-                      status: 'success',
-                      solution: {
-                        x: "Identified",
-                        y: "Identified",
-                        factor1: sorted[0],
-                        factor2: sorted[1],
-                        allFactors: sorted
-                      } as any,
-                      executionTime: elapsed,
-                      cycles: finalOps
-                    }));
-                    return;
-                  } else {
-                    addLog(`⚡ Block Wiedemann split factor (${f1.toString().slice(0, 14)}...) — resolving remaining composite prime tree...`);
-                  }
-                }
-              }
+              triggerOffThreadGf2Solve('chronos');
             }
           }
+        } else if (type === 'hgs_relations_batch') {
+          const batch: SmoothRelation[] = e.data.relations || [];
+          const scannedBatchOps = (e.data.scannedCount || 0) + (e.data.blocksProcessed || 0) * 64 + 400;
+          workerOpsMap[workerId] = Math.max(workerOpsMap[workerId] + 400, scannedBatchOps);
+          setChronosSteps(getCurrentTotalOps());
+          if (typeof e.data.scannedCount === 'number') workerScannedMap[workerId] = e.data.scannedCount;
+          if (typeof e.data.skippedCount === 'number') workerSkippedMap[workerId] = e.data.skippedCount;
+          if (typeof e.data.blocksProcessed === 'number') workerBlocksMap[workerId] = e.data.blocksProcessed;
+          if (typeof e.data.squfof2Lp === 'number') workerSqufofMap[workerId] = e.data.squfof2Lp;
+
+          if (e.data.targetN === N && (useSiqsUnified || isHgs)) {
+            const { addedFull, addedPartial, newCollisions } = batch.length > 0
+              ? lpPool.ingestBatch(batch)
+              : { addedFull: 0, addedPartial: 0, newCollisions: 0 };
+            hgsRelCount += addedFull + newCollisions;
+            workerPolysMap[workerId] = e.data.polysProcessed || workerPolysMap[workerId] || 0;
+
+            const collected = lpPool.fullCount;
+            const elapsedSecNow = getActiveElapsedSec();
+            const totalPolysNow = workerPolysMap.reduce((a, b) => a + b, 0);
+            const totalScannedNow = workerScannedMap.reduce((a, b) => a + b, 0);
+            const totalSkippedNow = workerSkippedMap.reduce((a, b) => a + b, 0);
+            const totalBlocksNow = workerBlocksMap.reduce((a, b) => a + b, 0);
+            const totalSqufofNow = workerSqufofMap.reduce((a, b) => a + b, 0);
+
+            if (addedFull > 0 || addedPartial > 0 || typeof e.data.polysPerSec === 'number') {
+              const kindStr = e.data.engineKind;
+              const defaultHgsStage = kindStr === 'wasm-simd'
+                ? 'HGS WASM-SIMD + SQUFOF'
+                : (kindStr === 'wasm-i64' ? 'HGS WASM-i64 + SQUFOF' : 'HGS 128-Bias+SQUFOF');
+              setWorkerThreadsStats(prev => {
+                const next = [...prev];
+                if (next[workerId]) {
+                  next[workerId] = {
+                    ...next[workerId],
+                    role: 'hgs',
+                    engineKind: kindStr ?? next[workerId].engineKind,
+                    polys: workerPolysMap[workerId],
+                    polysPerSec: e.data.polysPerSec ?? next[workerId].polysPerSec,
+                    candsTested: e.data.candsTested ?? next[workerId].candsTested,
+                    squfofSplits: e.data.squfof2Lp ?? next[workerId].squfofSplits,
+                    lastBatchMs: e.data.batchDurationMs ?? next[workerId].lastBatchMs,
+                    relations: (next[workerId].relations || 0) + addedFull + addedPartial,
+                    stage: newCollisions > 0 ? `HGS (+${newCollisions} SQUFOF/LP)` : defaultHgsStage,
+                    active: true
+                  };
+                }
+                return next;
+              });
+
+              setChronosSmooth(collected);
+              setGf2Stats(prev => ({
+                ...prev,
+                collected,
+                target: targetRelationsCurrent,
+                factorBaseSize: activeFb.primes.length,
+                matrixSolves,
+                partialCount: lpPool.partialCount,
+                lpCollisions: lpPool.collisionsCount,
+                relationsPerSec: collected / elapsedSecNow,
+                polysProcessed: totalPolysNow,
+                lastSource: isHgs
+                  ? `Parallel HGS ×${numWorkers} (128-Bias + SQUFOF)`
+                  : `Unified GF(2): SIQS(${siqsRelCount}) + HGS(${hgsRelCount}) + CFRAC(${cfracRelCount})`
+              }));
+              setGf2Monitor(prev => ({
+                ...prev,
+                directFullCount: lpPool.directFullCount,
+                partialCount: lpPool.partialCount,
+                pendingCyclesCount: lpPool.pendingCyclesCount
+              }));
+            }
+
+            if (isHgs) {
+              const previewItems = batch
+                .filter(r => !r.largePrime)
+                .slice(0, 4)
+                .map((r, rIdx) => {
+                  const exps = new Array(Math.min(32, activeFb.primes.length + 1)).fill(0);
+                  if (r.signNeg) exps[0] = 1;
+                  const sc = r.sparseCols || [];
+                  for (let c = 0; c < sc.length; c++) {
+                    if (sc[c] + 1 < exps.length) exps[sc[c] + 1] = 1;
+                  }
+                  return {
+                    index: collected + rIdx,
+                    x: r.xVal,
+                    X: r.xVal,
+                    Q: r.qVal || '',
+                    exponents: exps
+                  };
+                });
+
+              setHgsTrace(prev => prev ? {
+                ...prev,
+                stage: collected >= targetRelationsCurrent ? 'linear_algebra' : 'sieving',
+                smoothCount: collected,
+                targetSmooth: targetRelationsCurrent,
+                scannedCount: totalScannedNow || prev.scannedCount,
+                skippedCount: totalSkippedNow || prev.skippedCount,
+                blocksProcessed: totalBlocksNow,
+                squfof2LpCount: totalSqufofNow,
+                lpCollisions: lpPool.collisionsCount,
+                partialCount: lpPool.partialCount,
+                relRatePerSec: collected / elapsedSecNow,
+                activeWorkers: numWorkers,
+                duration: Date.now() - runStartedAt,
+                relations: previewItems.length > 0
+                  ? [...prev.relations, ...previewItems].slice(-36)
+                  : prev.relations
+              } : prev);
+              setCpuUsage(Math.min(98, 45 + Math.round((collected / Math.max(1, targetRelationsCurrent)) * 52)));
+            }
+
+            if (addedFull > 0 || addedPartial > 0) {
+              triggerOffThreadGf2Solve('hgs');
+            }
+          }
+        } else if (type === 'stage' && isHgs) {
+          setHgsTrace(prev => ({
+            ...(prev || {
+              stage: 'presieve',
+              factorBase: [],
+              factorBaseSize: 0,
+              polynomial: 'SIQS Q(x) = A x² + 2Bx + C',
+              smoothCount: 0,
+              targetSmooth: 45,
+              scannedCount: 0,
+              skippedCount: 0,
+              relations: [],
+              matrixPreview: [],
+              congruence: null,
+              factorTree: null
+            }),
+            stage: e.data.stage,
+            stageMessage: e.data.message
+          }));
+        } else if (type === 'fb_built' && isHgs) {
+          setHgsTrace(prev => ({
+            ...(prev || {
+              stage: 'building_fb',
+              factorBase: [],
+              factorBaseSize: 0,
+              polynomial: '',
+              smoothCount: 0,
+              targetSmooth: 45,
+              scannedCount: 0,
+              skippedCount: 0,
+              relations: [],
+              matrixPreview: [],
+              congruence: null,
+              factorTree: null
+            }),
+            stage: 'sieving',
+            factorBase: e.data.factorBase || [],
+            factorBaseSize: e.data.factorBaseSize || 0,
+            polynomial: e.data.polynomial || '',
+            targetSmooth: e.data.targetSmooth || 45
+          }));
+        } else if (type === 'smooth_relation' && isHgs) {
+          setHgsTrace(prev => {
+            if (!prev) return prev;
+            const nextRels = e.data.relation
+              ? [...prev.relations, e.data.relation].slice(-36)
+              : prev.relations;
+            return {
+              ...prev,
+              smoothCount: e.data.smoothCount ?? prev.smoothCount,
+              targetSmooth: e.data.targetSmooth ?? prev.targetSmooth,
+              scannedCount: e.data.scannedCount ?? prev.scannedCount,
+              skippedCount: e.data.skippedCount ?? prev.skippedCount,
+              relations: nextRels
+            };
+          });
+          setCpuUsage(Math.min(96, 40 + Math.round(((e.data.smoothCount || 1) / Math.max(1, e.data.targetSmooth || 45)) * 55)));
+        } else if (type === 'f2_matrix_solved' && isHgs) {
+          setHgsTrace(prev => prev ? {
+            ...prev,
+            stage: 'congruence',
+            matrixPreview: e.data.matrixPreview || [],
+            matrixDimensions: {
+              rows: e.data.rows || 0,
+              cols: e.data.cols || 0,
+              dependencies: e.data.dependenciesCount || 0
+            }
+          } : prev);
+        } else if (type === 'congruence_hit' && isHgs) {
+          setHgsTrace(prev => prev ? {
+            ...prev,
+            stage: 'success',
+            duration: e.data.duration,
+            congruence: {
+              X: e.data.X,
+              Y: e.data.Y,
+              diff: e.data.diff,
+              g1: e.data.g1,
+              g2: e.data.g2,
+              factor1: e.data.factor1,
+              factor2: e.data.factor2,
+              duration: e.data.duration
+            }
+          } : prev);
         } else if (type === 'cfrac_progress') {
           const workerSteps = e.data.steps ?? 0;
           const workerK = e.data.kMultiplier ?? workerCfracKMap[currentWorkerId] ?? activeCfracK;
           workerOpsMap[currentWorkerId] = Math.max(workerOpsMap[currentWorkerId], workerSteps * 4);
+          setChronosSteps(getCurrentTotalOps());
           setCpuUsage(Math.min(96, 40 + Math.round(((lpPool.fullCount + 1) / Math.max(1, targetRelations)) * 55)));
           setCfracInfo(prev => ({
             kMultiplier: workerK,
@@ -1151,11 +2102,12 @@ const App: React.FC = () => {
           const batch: SmoothRelation[] = e.data.relations || [];
           const workerK = e.data.kMultiplier ?? workerCfracKMap[currentWorkerId] ?? activeCfracK;
           workerOpsMap[currentWorkerId] = Math.max(workerOpsMap[currentWorkerId], (e.data.steps ?? 0) * 4);
+          setChronosSteps(getCurrentTotalOps());
           if (e.data.targetN === N && batch.length > 0 && (isCfrac || workerK === activeCfracK)) {
             const { addedFull, addedPartial, newCollisions } = lpPool.ingestBatch(batch);
             cfracRelCount += addedFull + newCollisions;
             const collected = lpPool.fullCount;
-            const elapsedSecNow = Math.max(0.05, (Date.now() - runStartedAt) / 1000);
+            const elapsedSecNow = getActiveElapsedSec();
             const totalCfracStepsNow = workerOpsMap.reduce((acc, v) => acc + Math.floor(v / 4), 0);
 
             setWorkerThreadsStats(prev => {
@@ -1164,6 +2116,7 @@ const App: React.FC = () => {
                 next[currentWorkerId] = {
                   ...next[currentWorkerId],
                   polys: e.data.steps ?? 0,
+                  lastBatchMs: e.data.batchDurationMs ?? next[currentWorkerId].lastBatchMs,
                   relations: (next[currentWorkerId].relations || 0) + addedFull + addedPartial,
                   stage: `CFRAC k=${workerK} → GF(2)`,
                   active: true
@@ -1176,98 +2129,38 @@ const App: React.FC = () => {
               kMultiplier: workerK,
               steps: totalCfracStepsNow,
               fbSize: activeFb.primes.length,
-              targetRelations,
+              targetRelations: targetRelationsCurrent,
               convergentsSample: e.data.convergentsSample ?? [],
               smoothRelations: collected,
               partialRelations: lpPool.partialCount,
               lpCollisions: lpPool.collisionsCount,
-              statusLabel: collected >= targetRelations
-                ? 'حل مصفوفة GF(2) Block Wiedemann...'
-                : (numWorkers > 1 && isCfrac ? `تجميع متوازٍ (${numWorkers} خيوط → ${collected}/${targetRelations})` : `تجميع علاقات CFRAC (k=${workerK})`)
+              statusLabel: collected >= targetRelationsCurrent
+                ? 'حل مصفوفة GF(2) في Worker مستقل...'
+                : (numWorkers > 1 && isCfrac ? `تجميع متوازٍ (${numWorkers} خيوط → ${collected}/${targetRelationsCurrent})` : `تجميع علاقات CFRAC (k=${workerK})`)
             });
 
             setGf2Stats(prev => ({
               ...prev,
               collected,
-              target: targetRelations,
+              target: targetRelationsCurrent,
               factorBaseSize: activeFb.primes.length,
               matrixSolves,
               partialCount: lpPool.partialCount,
               lpCollisions: lpPool.collisionsCount,
               relationsPerSec: collected / elapsedSecNow,
               polysProcessed: totalCfracStepsNow + workerPolysMap.reduce((a, b) => a + b, 0),
-              lastSource: isChronos && siqsRelCount > 0
-                ? `Unified GF(2): SIQS(${siqsRelCount}) + CFRAC(${cfracRelCount})`
-                : `Parallel CFRAC ×${numWorkers} (${collected}/${targetRelations})`
+              lastSource: isChronos && (siqsRelCount > 0 || hgsRelCount > 0)
+                ? `Unified GF(2): SIQS(${siqsRelCount}) + HGS(${hgsRelCount}) + CFRAC(${cfracRelCount})`
+                : `Parallel CFRAC ×${numWorkers} (${collected}/${targetRelationsCurrent})`
+            }));
+            setGf2Monitor(prev => ({
+              ...prev,
+              directFullCount: lpPool.directFullCount,
+              partialCount: lpPool.partialCount,
+              pendingCyclesCount: lpPool.pendingCyclesCount
             }));
 
-            const solveDeltaCfrac = nBitsVal >= 120 ? 10 : 4;
-            if (collected >= targetRelations && (collected - lastMatrixSolveLen >= solveDeltaCfrac || matrixSolves === 0)) {
-              lastMatrixSolveLen = collected;
-              matrixSolves++;
-              const bwRes = solveBlockWiedemann(nBig, activeFb.primes, lpPool.getFullRelations(), lpPool.getRedcCtx());
-              if (bwRes.redcBenchmark) {
-                setRedcSpeedupInfo(bwRes.redcBenchmark);
-              }
-              krylovOpsAccum += Math.max(64, (bwRes.krylovSteps || 1) * 64);
-              setGf2Stats(prev => ({
-                ...prev,
-                matrixSolves,
-                krylovSteps: bwRes.krylovSteps,
-                coreShape: `${bwRes.coreRows}×${bwRes.coreCols}`,
-                solverMethod: bwRes.methodUsed
-              }));
-
-              if (bwRes.factor && bwRes.factor > 1n && bwRes.factor < nBig) {
-                const f1 = bwRes.factor;
-                const f2 = nBig / f1;
-                if (isProbablePrimeBig(f1, 10) && isProbablePrimeBig(f2, 10)) {
-                  solutionFound = true;
-                  const sorted = [f1, f2].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
-                  const durationMs = Math.max(1, Date.now() - runStartedAt);
-                  const elapsed = durationMs / 1000;
-                  const finalOps = getCurrentTotalOps();
-                  const winLabel = isChronos && siqsRelCount > 0
-                    ? `GF(2) الموحد (SIQS + CFRAC · ${bwRes.methodUsed})`
-                    : `Parallel CFRAC ×${numWorkers} (k=${workerK}) · ${bwRes.methodUsed}`;
-
-                  setBenchmarkHistory(prev => [
-                    {
-                      mode: 'cfrac',
-                      bits: nBitsVal,
-                      n: N,
-                      durationMs,
-                      relationsCollected: collected,
-                      polysProcessed: totalCfracStepsNow,
-                      relationsPerSec: Number((collected / (durationMs / 1000)).toFixed(2)),
-                      lpCollisions: lpPool.collisionsCount,
-                      solveMethod: winLabel,
-                      verified: f1 * f2 === nBig
-                    },
-                    ...prev
-                  ].slice(0, 12));
-
-                  finishUnifiedSuccess(winLabel, sorted, durationMs, finalOps, isChronos ? `حُسمت مصفوفة GF(2) الموحدة بمشاركة CFRAC (${cfracRelCount}) و SIQS (${siqsRelCount}).` : undefined);
-
-                  addLog(`✅ ${t.factorizationSuccess} (${winLabel} · ${durationMs}ms · ${finalOps.toLocaleString()} ops)`);
-                  addLog(`Prime Factors: ${sorted.join(' × ')}`);
-                  setSimState(prev => ({
-                    ...prev,
-                    status: 'success',
-                    solution: {
-                      x: "Identified",
-                      y: "Identified",
-                      factor1: sorted[0],
-                      factor2: sorted[1],
-                      allFactors: sorted
-                    } as any,
-                    executionTime: elapsed,
-                    cycles: finalOps
-                  }));
-                  return;
-                }
-              }
-            }
+            triggerOffThreadGf2Solve('cfrac', workerK);
           }
         } else if (type === 'cfrac_period_exhausted') {
           if (isCfrac && cfracUnionFb) {
@@ -1279,6 +2172,7 @@ const App: React.FC = () => {
               addLog(`>> CFRAC W#${currentWorkerId + 1} switched to k=${nextK} (keeping ${lpPool.fullCount} shared relations).`);
               workersRef.current[currentWorkerId].postMessage({
                 type: 'start',
+                workerId: currentWorkerId,
                 n: N,
                 kMultiplier: nextK,
                 fbPrimes: sub.localPrimes,
@@ -1307,6 +2201,7 @@ const App: React.FC = () => {
               addLog(`>> CFRAC Period Reached: Switching to multiplier k=${activeCfracK} (shared QR-FB=${activeFb.primes.length}).`);
               workersRef.current[currentWorkerId].postMessage({
                 type: 'start',
+                workerId: currentWorkerId,
                 n: N,
                 kMultiplier: activeCfracK,
                 fbPrimes: activeFb.primes,
@@ -1473,13 +2368,30 @@ const App: React.FC = () => {
           }
 
           if (recoveredFactors.length > 0) {
+            if (isHgs && e.data.tree) {
+              setHgsTrace(prev => prev ? {
+                ...prev,
+                stage: 'success',
+                duration: durationMs,
+                factorTree: e.data.tree
+              } : prev);
+            }
             const roleWin = workerRoles[currentWorkerId] === 'cfrac'
               ? (rawMethod || 'CFRAC Direct Congruence')
+              : workerRoles[currentWorkerId] === 'hgs'
+              ? (rawMethod || 'HGS SIQS (Gray-Code + 1LP/2LP + markowitz-core)')
               : (workerRoles[currentWorkerId] === 'ecm'
                 ? 'Chronos Montgomery REDC ECM / p±1'
                 : (rawMethod || `Chronos Worker #${workerId + 1}`));
 
             finishUnifiedSuccess(roleWin, recoveredFactors, durationMs, finalOps);
+            if (universalExpRunRef.current && stopStage1OnUniversalExpRef.current) {
+              const rep = computeUniversalExponentReport(N, 'standard', 0.258, undefined, undefined, { stopStage1BeforeFactors: true });
+              addLog(`⏹ تم إيقاف المرحلة 1 قبل عرض العوامل فور تحديد الأس العام λ(N) (${durationMs}ms).`);
+              addLog(`λ(N) = ${rep.lambdaN}`);
+              setSimState(prev => ({ ...prev, status: 'idle', solution: null }));
+              return;
+            }
             const product = recoveredFactors.reduce((acc: bigint, f: string) => acc * BigInt(f), 1n);
             addLog(`✅ ${t.factorizationSuccess} (${roleWin} · ${durationMs}ms · ${finalOps.toLocaleString()} ops)`);
             addLog(`Prime Factors: ${recoveredFactors.join(' × ')}`);
@@ -1498,6 +2410,19 @@ const App: React.FC = () => {
               executionTime: elapsed,
               cycles: finalOps
             }));
+          } else if (isZeta) {
+            if (raceTimerRef.current) {
+              window.clearInterval(raceTimerRef.current);
+              raceTimerRef.current = null;
+            }
+            workersRef.current.forEach(w => w.terminate());
+            workersRef.current = [];
+            workerUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+            workerUrlsRef.current = [];
+            addLog(`>> انتهى المسح الطيفي السريع لأصفار زيتا دون قاسم مباشر — تصعيد تلقائي إلى السباق المتوازي الكامل (SIQS v4 + CFRAC + Zeta REDC ECM)...`);
+            setTimeout(() => {
+              runAttack(N, 'chronos-196', activeHints, universalExpRunRef.current);
+            }, 30);
           } else {
             finishUnifiedSuccess('Failed', [], durationMs, finalOps);
             setUnifiedRace(prev => ({ ...prev, status: 'failed' }));
@@ -1511,11 +2436,15 @@ const App: React.FC = () => {
       };
 
       let solutionFound = false;
-      let siqsRankCounter = 0;
+      let polyRankCounter = 0;
 
       for (let wId = 0; wId < numWorkers; wId++) {
         const wRole = workerRoles[wId];
-        const wUrl = wRole === 'cfrac' ? cfracUrl : (isChronos ? chronosUrl : fallbackStrategyUrl);
+        const wUrl = wRole === 'cfrac'
+          ? cfracUrl
+          : wRole === 'hgs'
+          ? hgsUrl
+          : (isChronos ? chronosUrl : fallbackStrategyUrl);
         const w = new Worker(wUrl);
         workersRef.current.push(w);
         if (wId === 0) workerRef.current = w;
@@ -1543,6 +2472,7 @@ const App: React.FC = () => {
             const sub = cfracUnionFb.getWorkerSubset(wK);
             w.postMessage({
               type: 'start',
+              workerId: wId,
               n: N,
               kMultiplier: wK,
               fbPrimes: sub.localPrimes,
@@ -1552,15 +2482,47 @@ const App: React.FC = () => {
           } else {
             w.postMessage({
               type: 'start',
+              workerId: wId,
               n: N,
               kMultiplier: activeCfracK,
               fbPrimes: activeFb.primes,
               largePrimeBound: activeFb.largePrimeBound
             });
           }
+        } else if (wRole === 'hgs') {
+          if (useSiqsUnified || (isHgs && activeFb.primes.length >= 6)) {
+            const zfSeed = zfWorkerSeeds[wId]?.seedOffset ?? (wId * 250000);
+            const myPolyRank = polyRankCounter++;
+            w.postMessage({
+              type: 'start',
+              unifiedGf2: useSiqsUnified,
+              sharedCoordinator: true,
+              n: N,
+              targetM: siqsM.toString(),
+              workerId: wId,
+              hgsRank: myPolyRank,
+              hgsTotalWorkers: totalPolyWorkers,
+              seedOffset: zfSeed,
+              fbPrimes: activeFb.primes,
+              fbRoots: activeFb.roots,
+              largePrimeBound: activeFb.largePrimeBound,
+              sieveMode,
+              sieveWeights: activeSieveWeights
+            });
+          } else {
+            w.postMessage({
+              type: 'start',
+              unifiedGf2: false,
+              sharedCoordinator: false,
+              n: N,
+              workerId: wId,
+              sieveMode,
+              sieveWeights: activeSieveWeights
+            });
+          }
         } else if (isChronos) {
           const zfSeed = zfWorkerSeeds[wId]?.seedOffset ?? (wId * 250000);
-          const mySiqsRank = wRole === 'siqs' ? siqsRankCounter++ : 0;
+          const mySiqsRank = wRole === 'siqs' ? polyRankCounter++ : 0;
           w.postMessage({
             type: 'start',
             n: N,
@@ -1569,7 +2531,7 @@ const App: React.FC = () => {
             workerId: wId,
             totalWorkers: numWorkers,
             siqsRank: mySiqsRank,
-            siqsTotalWorkers: totalSiqsWorkers,
+            siqsTotalWorkers: totalPolyWorkers,
             seedOffset: zfSeed,
             fbPrimes: activeFb.primes,
             fbRoots: activeFb.roots,
@@ -1619,16 +2581,19 @@ const App: React.FC = () => {
       const q = generatePrime(bitSize);
       const n = p * q;
       const actualBits = n.toString(2).length;
+      cacheFactorization(n, p, q, [p, q], 'Generated RSA Key');
+      const keyRep = computeUniversalExponentReport(n, 'standard', 0.258, p, q);
 
       setRsaKey({
         p: p.toString(),
         q: q.toString(),
         n: n.toString(),
-        e: "65537",
-        d: "???",
+        e: keyRep.minimalPublicExponentE || keyRep.publicExponentE || '???',
+        d: keyRep.minimalPrivateExponentD || keyRep.privateExponentD || '???',
         bits: actualBits
       });
       setUnifiedRace({ status: 'idle', winningEngine: null, factors: [], verifiedProduct: false, verifiedPrimes: false, elapsedMs: 0, totalOperations: 0 });
+      setUniversalExpStage1Halted(false);
 
       setSimState({
         status: 'idle',
@@ -1766,10 +2731,35 @@ const App: React.FC = () => {
             >
               5. الملخص العلمي ZF (الإصدارات 1-17)
             </button>
+            <button
+              onClick={() => setView('cmve')}
+              className={`px-4 py-2 rounded-lg text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
+                view === 'cmve'
+                  ? 'bg-white text-[#14532D] border border-[#BBF7D0] shadow-sm'
+                  : 'text-[#57534E] hover:text-[#1C1917]'
+              }`}
+            >
+              6. التحقق العلمي CMVE والشهادات (v5)
+            </button>
           </nav>
         </header>
 
         {view === 'zf-summary' && <ZfProjectSummaryModule />}
+
+        {view === 'cmve' && (
+          <CmveVerificationPanel
+            currentN={rsaKey?.n || ''}
+            currentFactors={
+              (simState.solution as any)?.allFactors?.length
+                ? (simState.solution as any).allFactors
+                : (rsaKey?.p && rsaKey?.q && rsaKey.p !== '???' && rsaKey.q !== '???' ? [rsaKey.p, rsaKey.q] : [])
+            }
+            currentE={rsaKey?.e}
+            currentD={rsaKey?.d}
+            lang={lang}
+            onSyncN={handleManualNChange}
+          />
+        )}
 
         {/* Tab 1: Unified Factorizer & Chronos v4 Parallel Lab */}
         {view === 'factorizer' && (
@@ -1782,11 +2772,12 @@ const App: React.FC = () => {
               onSelectAlgorithm={(alg) => {
                 setPrimaryAlgorithm(alg);
                 if (alg === 'cfrac') setStrategy('cfrac');
+                else if (alg === 'hgs') setStrategy('hgs');
                 else if (alg === 'zeta') setStrategy('zeta');
                 else if (alg === 'chronos-196') setStrategy('chronos-196');
               }}
               onLaunchChronos={(targetN, algOverride) => {
-                const chosen = algOverride || (primaryAlgorithm === 'cfrac' ? 'cfrac' : (primaryAlgorithm === 'zeta' ? 'zeta' : 'chronos-196'));
+                const chosen = algOverride || (primaryAlgorithm === 'cfrac' ? 'cfrac' : (primaryAlgorithm === 'hgs' ? 'hgs' : (primaryAlgorithm === 'zeta' ? 'zeta' : 'chronos-196')));
                 setStrategy(chosen);
                 runAttack(targetN, chosen);
               }}
@@ -1800,26 +2791,37 @@ const App: React.FC = () => {
                       allFactors: (simState.solution as any).allFactors,
                       method: strategy === 'cfrac'
                         ? 'Parallel CFRAC (Fast 2LP + Shared GF(2) Block Wiedemann)'
-                        : (strategy === 'zeta'
-                          ? 'Zeta 48-Zeros Spectral Seeding (500d / 160d)'
-                          : 'Chronos v4 (SIQS + 1LP + Block Wiedemann + Zeta REDC ECM)'),
+                        : (strategy === 'hgs'
+                          ? 'HGS SIQS (Multi-Poly Gray-Code + 1LP/2LP + markowitz-core)'
+                          : (strategy === 'zeta'
+                            ? 'Zeta 48-Zeros Spectral Seeding (500d / 160d)'
+                            : 'Chronos v4 (SIQS + HGS + CFRAC + REDC ECM · markowitz-core)')),
                       duration: simState.executionTime ? Math.round(simState.executionTime * 1000) : undefined
                     }
                   : null
               }
               onJumpToBlock={handleJumpToBlock}
+              stopStage1OnUniversalExp={stopStage1OnUniversalExp}
+              onToggleStopStage1OnUniversalExp={setStopStage1OnUniversalExp}
+              onComputeUniversalExponent={handleComputeUniversalExponent}
+              isUniversalExpPending={isUniversalExpPending}
+              universalExpStage1Halted={universalExpStage1Halted}
+              onRevealFactorsAfterStage1={handleRevealFactorsAfterStage1}
             />
 
             {primaryAlgorithm === 'coppersmith' && (
               <CoppersmithLabPanel
                 onFactorsRecovered={(nRecovered, pRecovered, qRecovered, methodLabel, durationMs) => {
                   const sorted = [BigInt(pRecovered), BigInt(qRecovered)].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
+                  cacheFactorization(nRecovered, sorted[0], sorted[1], sorted, methodLabel);
+                  const rep = computeUniversalExponentReport(nRecovered, 'standard', 0.258, sorted[0], sorted[1]);
+                  setUniversalExpStage1Halted(false);
                   setRsaKey({
                     n: nRecovered,
                     p: sorted[0],
                     q: sorted[1],
-                    e: '65537',
-                    d: '???',
+                    e: rep.minimalPublicExponentE || rep.publicExponentE || '???',
+                    d: rep.minimalPrivateExponentD || rep.privateExponentD || '???',
                     bits: BigInt(nRecovered).toString(2).length
                   });
                   setSimState(prev => ({
@@ -1841,6 +2843,18 @@ const App: React.FC = () => {
                     executionTime: durationMs / 1000
                   }));
                 }}
+              />
+            )}
+
+            {primaryAlgorithm === 'hgs' && (
+              <HgsDashboard
+                nValue={rsaKey?.n || ''}
+                lang={lang}
+                t={t}
+                trace={hgsTrace}
+                isRunning={workerActive}
+                onLaunchHgs={(targetN) => runAttack(targetN || rsaKey?.n, 'hgs')}
+                onStopHgs={stopAttack}
               />
             )}
 
@@ -1883,12 +2897,15 @@ const App: React.FC = () => {
               <Zf1819LabPanel
                 onFactorsRecovered={(nRecovered, pRecovered, qRecovered, methodLabel, durationMs) => {
                   const sorted = [BigInt(pRecovered), BigInt(qRecovered)].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
+                  cacheFactorization(nRecovered, sorted[0], sorted[1], sorted, methodLabel);
+                  const rep = computeUniversalExponentReport(nRecovered, 'standard', 0.258, sorted[0], sorted[1]);
+                  setUniversalExpStage1Halted(false);
                   setRsaKey({
                     n: nRecovered,
                     p: sorted[0],
                     q: sorted[1],
-                    e: '65537',
-                    d: '???',
+                    e: rep.minimalPublicExponentE || rep.publicExponentE || '???',
+                    d: rep.minimalPrivateExponentD || rep.privateExponentD || '???',
                     bits: BigInt(nRecovered).toString(2).length
                   });
                   setSimState(prev => ({
@@ -1926,12 +2943,15 @@ const App: React.FC = () => {
                 }}
                 onFactorsRecovered={(nRecovered, pRecovered, qRecovered, methodLabel, durationMs) => {
                   const sorted = [BigInt(pRecovered), BigInt(qRecovered)].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
+                  cacheFactorization(nRecovered, sorted[0], sorted[1], sorted, methodLabel);
+                  const rep = computeUniversalExponentReport(nRecovered, 'standard', 0.258, sorted[0], sorted[1]);
+                  setUniversalExpStage1Halted(false);
                   setRsaKey({
                     n: nRecovered,
                     p: sorted[0],
                     q: sorted[1],
-                    e: '65537',
-                    d: '???',
+                    e: rep.minimalPublicExponentE || rep.publicExponentE || '???',
+                    d: rep.minimalPrivateExponentD || rep.privateExponentD || '???',
                     bits: BigInt(nRecovered).toString(2).length
                   });
                   setSimState(prev => ({
@@ -1965,12 +2985,15 @@ const App: React.FC = () => {
                 }}
                 onFactorsRecovered={(nRecovered, pRecovered, qRecovered, methodLabel, durationMs) => {
                   const sorted = [BigInt(pRecovered), BigInt(qRecovered)].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
+                  cacheFactorization(nRecovered, sorted[0], sorted[1], sorted, methodLabel);
+                  const rep = computeUniversalExponentReport(nRecovered, 'standard', 0.258, sorted[0], sorted[1]);
+                  setUniversalExpStage1Halted(false);
                   setRsaKey({
                     n: nRecovered,
                     p: sorted[0],
                     q: sorted[1],
-                    e: '65537',
-                    d: '???',
+                    e: rep.minimalPublicExponentE || rep.publicExponentE || '???',
+                    d: rep.minimalPrivateExponentD || rep.privateExponentD || '???',
                     bits: BigInt(nRecovered).toString(2).length
                   });
                   setSimState(prev => ({
@@ -1994,6 +3017,58 @@ const App: React.FC = () => {
                 }}
               />
             )}
+
+            {primaryAlgorithm === 'ppfo-2000' && (
+              <Ppfo2000LabPanel
+                currentN={rsaKey?.n || ''}
+                onChangeN={handleManualNChange}
+                onFactorsRecovered={(nRecovered, pRecovered, qRecovered, methodLabel, durationMs, allFactors) => {
+                  const sorted = [BigInt(pRecovered), BigInt(qRecovered)].sort((a, b) => (a < b ? -1 : 1)).map(v => v.toString());
+                  cacheFactorization(nRecovered, sorted[0], sorted[1], allFactors || sorted, methodLabel);
+                  const rep = computeUniversalExponentReport(nRecovered, 'standard', 0.258, sorted[0], sorted[1]);
+                  setUniversalExpStage1Halted(false);
+                  setRsaKey({
+                    n: nRecovered,
+                    p: sorted[0],
+                    q: sorted[1],
+                    e: rep.minimalPublicExponentE || rep.publicExponentE || '???',
+                    d: rep.minimalPrivateExponentD || rep.privateExponentD || '???',
+                    bits: BigInt(nRecovered).toString(2).length
+                  });
+                  setSimState(prev => ({
+                    ...prev,
+                    status: 'success',
+                    logs: [
+                      ...prev.logs,
+                      `✅ ${methodLabel} Solved ${BigInt(nRecovered).toString(2).length}-bit modulus in ${durationMs}ms.`,
+                      `Factors: ${(allFactors || sorted).join(' × ')}`
+                    ],
+                    solution: {
+                      x: 'Identified',
+                      y: 'Identified',
+                      factor1: sorted[0],
+                      factor2: sorted[1],
+                      allFactors: allFactors || sorted
+                    } as any,
+                    executionTime: durationMs / 1000
+                  }));
+                }}
+              />
+            )}
+
+            {primaryAlgorithm === 'python-console' && (
+              <PythonConsoleModule initialN={rsaKey?.n || '340282366920938462614824380041128836353'} />
+            )}
+
+            <WorkerMatrixMonitor
+              lang={lang}
+              isRunning={workerActive}
+              effectiveWorkerCount={effectiveWorkerCount}
+              workerThreadsStats={workerThreadsStats}
+              gf2Stats={gf2Stats}
+              gf2Monitor={gf2Monitor}
+              onTogglePauseSievers={handleTogglePauseSievers}
+            />
 
             <Chronos196Dashboard
               nValue={rsaKey?.n || ''}

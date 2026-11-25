@@ -12,6 +12,11 @@ import {
   runPsi31ComparisonForTarget,
   BOLTZMANN_K
 } from '../lib/psiFactorEngine';
+import {
+  computePsiPhaseCancellation,
+  preparePsiPhaseContext,
+  PsiPhaseCancellationMetrics
+} from '../lib/psiPhaseDiagnostics';
 
 interface PsiFactorLabPanelProps {
   onFactorsRecovered?: (n: string, p: string, q: string, methodLabel: string, durationMs: number) => void;
@@ -69,12 +74,32 @@ export const PsiFactorLabPanel: React.FC<PsiFactorLabPanelProps> = ({
   const [suiteProgress, setSuiteProgress] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
 
+  // Real-Time Ψ(δ) Phase Cancellation Diagnostics + Zeta Zero Scaling Factor Slider
+  const [zetaZeroScale, setZetaZeroScale] = useState<number>(1.0);
+  const [deltaProbe, setDeltaProbe] = useState<number>(0.0);
+  const [diagZeroCount, setDiagZeroCount] = useState<number>(48);
+
   const activeWheel = useMemo(
     () => WHEEL_OPTIONS.find(w => w.id === wheelId) ?? WHEEL_OPTIONS[2],
     [wheelId]
   );
 
   const wheelStats = useMemo(() => computeWheelStats(activeWheel.primes), [activeWheel]);
+
+  const preparedPhaseCtx = useMemo(() => {
+    const clean = nInput.replace(/[^0-9]/g, '');
+    try {
+      const nBig = clean ? BigInt(clean) : BigInt(PSI_31_PRESETS[2].n);
+      return preparePsiPhaseContext(nBig < 2n ? 2n : nBig, diagZeroCount);
+    } catch {
+      return preparePsiPhaseContext(BigInt(PSI_31_PRESETS[2].n), diagZeroCount);
+    }
+  }, [nInput, diagZeroCount]);
+
+  const phaseDiagnostics: PsiPhaseCancellationMetrics = useMemo(
+    () => computePsiPhaseCancellation(preparedPhaseCtx, zetaZeroScale, deltaProbe),
+    [preparedPhaseCtx, zetaZeroScale, deltaProbe]
+  );
 
   const handleRunLive = (overrideN?: string) => {
     const clean = (overrideN ?? nInput).replace(/[^0-9]/g, '');
@@ -389,6 +414,314 @@ export const PsiFactorLabPanel: React.FC<PsiFactorLabPanelProps> = ({
               </div>
             </div>
           )}
+
+          {/* Real-Time Ψ(δ) Phase Cancellation Diagnostic Panel */}
+          <div className="border border-[#E2DDD2] rounded-xl p-5 bg-[#FBF9F5] space-y-5">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-[#E2DDD2] pb-3.5">
+              <div className="space-y-1">
+                <div className="text-xs font-mono text-[#1E3A8A]">
+                  لوحة تشخيص الإلغاء الطوري الفوري · Real-Time Ψ(δ) Phase Cancellation Diagnostics
+                </div>
+                <h4 className="text-base font-bold font-serif-academic text-[#1C1917]">
+                  مقاييس التداخل والإلغاء الطوري لدالة <span dir="ltr" className="font-mono">Ψ(δ)</span> وتدريج أصفار زيتا
+                </h4>
+                <p className="text-[11px] text-[#57534E]">
+                  اختزال الطور بدقة 530 خانة{' '}
+                  <MathFormula
+                    tex="\theta_k(\delta) = \big((s \cdot \gamma_k \ln\sqrt{N} - \phi_k)\bmod 2\pi\big) + (s \cdot \gamma_k)\delta"
+                    className="mx-1"
+                  />{' '}
+                  مع قياس نسبة الإلغاء الهدام والتماسك الطوري لحظياً عند تحريك معامل التدريج <span dir="ltr" className="font-mono">s</span>.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <span className="text-[11px] font-bold text-[#57534E]">عدد الأصفار K:</span>
+                {[16, 32, 48, 96].map(kVal => (
+                  <button
+                    key={kVal}
+                    type="button"
+                    onClick={() => setDiagZeroCount(kVal)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-mono font-bold border transition-colors ${
+                      diagZeroCount === kVal
+                        ? 'bg-[#1E3A8A] text-white border-[#1E3A8A]'
+                        : 'bg-white border-[#E2DDD2] text-[#1C1917] hover:border-[#1E3A8A]'
+                    }`}
+                  >
+                    {kVal}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sliders Row: Zeta Zeros Scaling Factor + Delta Probe */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="bg-white border border-[#E2DDD2] rounded-xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="zeta-scale-slider" className="text-xs font-bold text-[#1C1917]">
+                    معامل تدريج أصفار زيتا (<span dir="ltr" className="font-mono">s · γₙ</span>)
+                  </label>
+                  <div className="flex items-center gap-2" dir="ltr">
+                    <span className="px-2 py-0.5 rounded bg-[#1E3A8A]/10 text-[#1E3A8A] font-mono font-bold text-xs">
+                      s = {zetaZeroScale.toFixed(2)}×
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setZetaZeroScale(1.0)}
+                      className="px-2 py-0.5 rounded border border-[#E2DDD2] text-[11px] font-mono text-[#57534E] hover:border-[#1E3A8A] hover:text-[#1E3A8A]"
+                    >
+                      1.00× (إعادة ضبط)
+                    </button>
+                  </div>
+                </div>
+                <input
+                  id="zeta-scale-slider"
+                  type="range"
+                  min={0.25}
+                  max={2.5}
+                  step={0.01}
+                  value={zetaZeroScale}
+                  onChange={e => setZetaZeroScale(Number(e.target.value))}
+                  className="w-full accent-[#1E3A8A] cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] font-mono text-[#57534E]" dir="ltr">
+                  <span>0.25× (compressed)</span>
+                  <span>1.00× (canonical γₙ)</span>
+                  <span>2.50× (stretched)</span>
+                </div>
+              </div>
+
+              <div className="bg-white border border-[#E2DDD2] rounded-xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="delta-probe-slider" className="text-xs font-bold text-[#1C1917]">
+                    موضع الفحص اللوغاريتمي (<span dir="ltr" className="font-mono">δ</span>)
+                  </label>
+                  <div className="flex items-center gap-2" dir="ltr">
+                    <span className="px-2 py-0.5 rounded bg-[#14532D]/10 text-[#14532D] font-mono font-bold text-xs">
+                      δ = {deltaProbe.toFixed(3)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDeltaProbe(phaseDiagnostics.peakDelta)}
+                      className="px-2 py-0.5 rounded bg-[#14532D] text-white text-[11px] font-mono hover:bg-[#166534]"
+                    >
+                      قفز للذروة δ* ({phaseDiagnostics.peakDelta.toFixed(3)})
+                    </button>
+                  </div>
+                </div>
+                <input
+                  id="delta-probe-slider"
+                  type="range"
+                  min={-1.0}
+                  max={0.05}
+                  step={0.005}
+                  value={deltaProbe}
+                  onChange={e => setDeltaProbe(Number(e.target.value))}
+                  className="w-full accent-[#14532D] cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] font-mono text-[#57534E]" dir="ltr">
+                  <span>δ = -1.000 (skewed p &lt;&lt; √N)</span>
+                  <span>δ = 0.000 (balanced √N)</span>
+                  <span>+0.050</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Real-Time Phase Cancellation Metrics Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 font-mono-tabular text-xs" dir="ltr">
+              <div className="bg-white border border-[#E2DDD2] rounded-lg p-3">
+                <div className="text-[10px] text-[#57534E]">Phase Cancellation κ</div>
+                <div className={`text-sm font-bold ${phaseDiagnostics.cancellationPct >= 70 ? 'text-[#9A3412]' : 'text-[#14532D]'}`}>
+                  {phaseDiagnostics.cancellationPct.toFixed(2)}%
+                </div>
+                <div className="text-[10px] text-[#57534E]">1 − |Ψ(δ)| / E_max</div>
+              </div>
+
+              <div className="bg-white border border-[#E2DDD2] rounded-lg p-3">
+                <div className="text-[10px] text-[#57534E]">Ψ(δ) Coherent Sum</div>
+                <div className="text-sm font-bold text-[#1E3A8A]">
+                  {phaseDiagnostics.psiValue >= 0 ? '+' : ''}
+                  {phaseDiagnostics.psiValue.toFixed(5)}
+                </div>
+                <div className="text-[10px] text-[#57534E]">Envelope E_max: {phaseDiagnostics.constructiveEnvelope.toFixed(4)}</div>
+              </div>
+
+              <div className="bg-white border border-[#E2DDD2] rounded-lg p-3">
+                <div className="text-[10px] text-[#57534E]">Phasor Coherence R(δ)</div>
+                <div className="text-sm font-bold text-[#1C1917]">
+                  {(phaseDiagnostics.phasorCoherenceR * 100).toFixed(2)}%
+                </div>
+                <div className="text-[10px] text-[#57534E]">|∑ wₖ e^(iθₖ)| / ∑ wₖ</div>
+              </div>
+
+              <div className="bg-white border border-[#E2DDD2] rounded-lg p-3">
+                <div className="text-[10px] text-[#57534E]">Constructive vs Destructive</div>
+                <div className="text-sm font-bold text-[#1C1917]">
+                  <span className="text-[#14532D]">+{phaseDiagnostics.constructiveCount}</span>
+                  {' / '}
+                  <span className="text-[#9A3412]">−{phaseDiagnostics.destructiveCount}</span>
+                </div>
+                <div className="text-[10px] text-[#57534E]">Net imbalance: {phaseDiagnostics.netBalancePct.toFixed(1)}%</div>
+              </div>
+
+              <div className="bg-white border border-[#E2DDD2] rounded-lg p-3">
+                <div className="text-[10px] text-[#57534E]">Peak δ* (Min Cancel)</div>
+                <div className="text-sm font-bold text-[#14532D]">
+                  {phaseDiagnostics.peakDelta.toFixed(4)}
+                </div>
+                <div className="text-[10px] text-[#57534E]">Cancel@δ*: {phaseDiagnostics.peakCancellationPct.toFixed(1)}%</div>
+              </div>
+
+              <div className="bg-white border border-[#E2DDD2] rounded-lg p-3">
+                <div className="text-[10px] text-[#57534E]">Candidate p_seed(δ*)</div>
+                <div className="text-xs font-bold text-[#1E3A8A] truncate" title={phaseDiagnostics.candidatePSeed}>
+                  {phaseDiagnostics.candidatePSeed.length > 16
+                    ? `${phaseDiagnostics.candidatePSeed.slice(0, 8)}...${phaseDiagnostics.candidatePSeed.slice(-6)}`
+                    : phaseDiagnostics.candidatePSeed}
+                </div>
+                <div className="text-[10px] text-[#57534E]">{phaseDiagnostics.nBits}-bit N · K={phaseDiagnostics.zeroCount}</div>
+              </div>
+            </div>
+
+            {/* Waveform & Phasor Cancellation Visualizers */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              {/* Ψ(δ) Sweep Waveform */}
+              <div className="lg:col-span-8 bg-white border border-[#E2DDD2] rounded-xl p-4 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-bold text-[#1C1917]">
+                    منحنى <span dir="ltr" className="font-mono">Ψ(δ)</span> عبر <span dir="ltr" className="font-mono">δ ∈ [-1.00, +0.05]</span>
+                  </span>
+                  <span className="text-[11px] font-mono text-[#57534E]" dir="ltr">
+                    Peak |Ψ| = {Math.abs(phaseDiagnostics.peakPsiValue).toFixed(5)} @ δ*={phaseDiagnostics.peakDelta.toFixed(3)}
+                  </span>
+                </div>
+                {(() => {
+                  const W = 560;
+                  const H = 148;
+                  const padX = 24;
+                  const padY = 14;
+                  const pts = phaseDiagnostics.profile;
+                  const maxAmp = Math.max(
+                    0.01,
+                    ...pts.map(p => Math.abs(p.psiValue))
+                  );
+                  const mapX = (d: number) =>
+                    padX + ((d - -1.0) / 1.05) * (W - 2 * padX);
+                  const mapY = (v: number) =>
+                    H / 2 - (v / maxAmp) * (H / 2 - padY);
+                  const polyPts = pts
+                    .map(p => `${mapX(p.delta).toFixed(1)},${mapY(p.psiValue).toFixed(1)}`)
+                    .join(' ');
+                  const probeX = mapX(deltaProbe);
+                  const probeY = mapY(phaseDiagnostics.psiValue);
+                  const peakX = mapX(phaseDiagnostics.peakDelta);
+
+                  return (
+                    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-36 bg-[#FBF9F5] rounded-lg border border-[#EAE5DA]">
+                      <line x1={padX} y1={H / 2} x2={W - padX} y2={H / 2} stroke="#D6D1C7" strokeDasharray="3 3" strokeWidth="1" />
+                      <line x1={peakX} y1={padY} x2={peakX} y2={H - padY} stroke="#14532D" strokeDasharray="4 3" strokeWidth="1.2" />
+                      <line x1={probeX} y1={padY} x2={probeX} y2={H - padY} stroke="#1E3A8A" strokeWidth="1.2" />
+                      <polyline fill="none" stroke="#1E3A8A" strokeWidth="2" points={polyPts} />
+                      <circle cx={probeX} cy={probeY} r="4.5" fill="#1E3A8A" stroke="#FFFFFF" strokeWidth="1.5" />
+                      <text x={peakX + 4} y={padY + 9} fontSize="9" fill="#14532D" fontFamily="monospace">
+                        δ*
+                      </text>
+                      <text x={probeX + 4} y={H - 6} fontSize="9" fill="#1E3A8A" fontFamily="monospace">
+                        δ={deltaProbe.toFixed(2)}
+                      </text>
+                    </svg>
+                  );
+                })()}
+              </div>
+
+              {/* Unit-Circle Phasor Interference Plot */}
+              <div className="lg:col-span-4 bg-white border border-[#E2DDD2] rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-[#1C1917]">مخطط المتجهات الطورية</span>
+                  <span className="text-[11px] font-mono text-[#57534E]" dir="ltr">
+                    R = {(phaseDiagnostics.phasorCoherenceR * 100).toFixed(1)}%
+                  </span>
+                </div>
+                {(() => {
+                  const S = 156;
+                  const C = S / 2;
+                  const R = 58;
+                  const maxW = Math.max(1e-6, phaseDiagnostics.perZero[0]?.weight || 0.08);
+                  let rx = 0;
+                  let ry = 0;
+                  phaseDiagnostics.perZero.forEach(z => {
+                    rx += z.weight * z.cosTheta;
+                    ry += z.weight * z.sinTheta;
+                  });
+                  const env = phaseDiagnostics.constructiveEnvelope || 1;
+                  const netX = C + (rx / env) * R;
+                  const netY = C - (ry / env) * R;
+
+                  return (
+                    <svg viewBox={`0 0 ${S} ${S}`} className="w-full h-36 bg-[#FBF9F5] rounded-lg border border-[#EAE5DA]">
+                      <circle cx={C} cy={C} r={R} fill="none" stroke="#D6D1C7" strokeWidth="1" />
+                      <line x1={C - R - 6} y1={C} x2={C + R + 6} y2={C} stroke="#EAE5DA" strokeWidth="1" />
+                      <line x1={C} y1={C - R - 6} x2={C} y2={C + R + 6} stroke="#EAE5DA" strokeWidth="1" />
+                      {phaseDiagnostics.perZero.slice(0, 24).map(z => {
+                        const len = (z.weight / maxW) * (R * 0.85);
+                        const px = C + len * z.cosTheta;
+                        const py = C - len * z.sinTheta;
+                        return (
+                          <line
+                            key={z.index}
+                            x1={C}
+                            y1={C}
+                            x2={px}
+                            y2={py}
+                            stroke={z.polarity === 'constructive' ? '#14532D' : '#9A3412'}
+                            strokeOpacity={0.45}
+                            strokeWidth="1.2"
+                          />
+                        );
+                      })}
+                      <line x1={C} y1={C} x2={netX} y2={netY} stroke="#1E3A8A" strokeWidth="2.5" />
+                      <circle cx={netX} cy={netY} r="3.5" fill="#1E3A8A" />
+                    </svg>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Per-Zero Phase Contributions (Top 12 Zeros) */}
+            <div className="overflow-x-auto border border-[#E2DDD2] rounded-lg bg-white" dir="ltr">
+              <table className="w-full text-left text-[11px] font-mono-tabular">
+                <thead className="bg-[#F4F0E8] text-[#57534E] border-b border-[#E2DDD2]">
+                  <tr>
+                    <th className="py-1.5 px-3">Zero #</th>
+                    <th className="py-1.5 px-3">Base γₙ</th>
+                    <th className="py-1.5 px-3">Scaled (s·γₙ)</th>
+                    <th className="py-1.5 px-3">θₙ(δ) mod 2π</th>
+                    <th className="py-1.5 px-3">cos θₙ</th>
+                    <th className="py-1.5 px-3">Term (−wₙ cos θₙ)</th>
+                    <th className="py-1.5 px-3">Interference</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#EAE5DA]">
+                  {phaseDiagnostics.perZero.slice(0, 12).map(z => (
+                    <tr key={z.index}>
+                      <td className="py-1.5 px-3 font-bold text-[#1E3A8A]">γ_{z.index}</td>
+                      <td className="py-1.5 px-3 text-[#57534E]">{z.gammaBase.toFixed(6)}</td>
+                      <td className="py-1.5 px-3 font-bold text-[#1C1917]">{z.gammaScaled.toFixed(6)}</td>
+                      <td className="py-1.5 px-3 text-[#1C1917]">{z.thetaRad.toFixed(5)} rad</td>
+                      <td className="py-1.5 px-3 text-[#1C1917]">{z.cosTheta.toFixed(5)}</td>
+                      <td className={`py-1.5 px-3 font-bold ${z.contribution >= 0 ? 'text-[#14532D]' : 'text-[#9A3412]'}`}>
+                        {z.contribution >= 0 ? '+' : ''}
+                        {z.contribution.toFixed(6)}
+                      </td>
+                      <td className={`py-1.5 px-3 font-bold ${z.polarity === 'constructive' ? 'text-[#14532D]' : 'text-[#9A3412]'}`}>
+                        {z.polarity === 'constructive' ? 'Constructive' : 'Destructive'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
 

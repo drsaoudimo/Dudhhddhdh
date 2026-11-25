@@ -681,12 +681,42 @@ export const ZETA_WORKER_CODE = getWorkerMontRedcCode() + `
     }
 
     if (montCtx) {
+      // Stage 4B: Zeta-Worker Montgomery Pollard p-1 (B1=35k, B2=350k)
+      const p1B1 = 35000;
+      const p1B2 = 350000;
+      const p1Primes = getPrimesUpToZ(p1B2);
+      let aM = montCtx.toMont(2n);
+      let p1Idx = 0;
+      let blockExp = 1n;
+      const blockCap = 1n << 256n;
+      for (; p1Idx < p1Primes.length && p1Primes[p1Idx] <= p1B1; p1Idx++) {
+        const pr = p1Primes[p1Idx];
+        let pw = pr;
+        while (pw * pr <= p1B1) pw *= pr;
+        blockExp *= BigInt(pw);
+        if (blockExp >= blockCap) {
+          aM = montCtx.montPow(aM, blockExp);
+          blockExp = 1n;
+          const aNorm = montCtx.fromMont(aM);
+          const gp1 = gcd(aNorm >= 1n ? aNorm - 1n : aNorm + N - 1n, N);
+          if (gp1 > 1n && gp1 < N) {
+            return { factor: gp1, method: 'Zeta-REDC Pollard p-1 Stage 1 (B1=35k)', steps: totalSteps + p1Idx, seeds };
+          }
+        }
+      }
+      if (blockExp > 1n) aM = montCtx.montPow(aM, blockExp);
+      const aNorm1 = montCtx.fromMont(aM);
+      const gp1a = gcd(aNorm1 >= 1n ? aNorm1 - 1n : aNorm1 + N - 1n, N);
+      if (gp1a > 1n && gp1a < N) {
+        return { factor: gp1a, method: 'Zeta-REDC Pollard p-1 Stage 1 (B1=35k)', steps: totalSteps + p1Idx, seeds };
+      }
+
       const nBits = N.toString(2).length;
-      const b1 = nBits > 140 ? 25000 : 8000;
-      const b2 = nBits > 140 ? 750000 : 240000;
+      const b1 = nBits > 140 ? 35000 : 8000;
+      const b2 = nBits > 140 ? 900000 : 240000;
       const primesB1 = getPrimesUpToZ(b1);
 
-      for (let c = 0; c < Math.max(16, seeds.length * 2); c++) {
+      for (let c = 0; c < Math.max(24, seeds.length * 3); c++) {
         const sd = seeds[c % seeds.length];
         const sigma = sd.sigmaSeed + BigInt(c * 7919);
         const ecmRes = runUnifiedEcmStage1And2(

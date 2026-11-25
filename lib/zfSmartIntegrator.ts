@@ -148,10 +148,22 @@ export const generateUltraPreciseZetaSeeds = (
     selectedPeaks.push({ delta: 0, score: scores[numPts - 1] });
   }
 
-  // Evaluate exact BD500 spectral functional at small offset deltaBD
+  // Fast BD500-phase-reduced spectral evaluator for sub-step golden-section maximization
+  // (theta0Num is already reduced mod 2pi in 530-digit BD500, eliminating catastrophic cancellation)
+  const evalSpecFast = (d: number): number => {
+    let acc = 0;
+    for (let k = 0; k < K; k++) {
+      const t = spectrumTerms[k];
+      acc -= t.weightNum * Math.cos(t.theta0Num + t.gammaNum * d);
+    }
+    return acc;
+  };
+
+  // Exact BD500 spectral refinement across dominant low-frequency terms for 500-digit final peak score
+  const topBdTerms = Math.min(K, 48);
   const evalSpecBD = (deltaBD: BD500): BD500 => {
     let acc = 0n;
-    for (let k = 0; k < K; k++) {
+    for (let k = 0; k < topBdTerms; k++) {
       const t = spectrumTerms[k];
       const ang = modTwoPiBD(bdAdd(t.theta0BD, bdMul(t.gammaBD, deltaBD)), twoPi);
       acc = bdSub(acc, bdMul(t.weightBD, bdCos(ang)));
@@ -160,39 +172,40 @@ export const generateUltraPreciseZetaSeeds = (
   };
 
   // Golden ratio inverse (sqrt(5) - 1)/2 in BD500
-  const invPhi = bdDivInt(bdSub(bdSqrt(bdFromBigInt(5n)), bdOne()), 2);
+  const invPhiNum = (Math.sqrt(5) - 1) / 2;
   const ksCandidates = [1, 3, 5, 7, 11, 13, 15, 17, 19, 21, 23, 29, 31, 37];
 
   return selectedPeaks.slice(0, count).map((pk, idx) => {
-    // 14-step BD500 Golden-Section sub-step refinement around [pk.delta - 0.01, pk.delta + 0.01]
-    let lo = bdFromNumber(Math.max(deltaMin, pk.delta - 0.01));
-    let hi = bdFromNumber(Math.min(deltaMax, pk.delta + 0.01));
-    let span = bdSub(hi, lo);
-    let x1 = bdSub(hi, bdMul(invPhi, span));
-    let x2 = bdAdd(lo, bdMul(invPhi, span));
-    let f1 = evalSpecBD(x1);
-    let f2 = evalSpecBD(x2);
+    // 18-step golden-section sub-step refinement around [pk.delta - 0.01, pk.delta + 0.01] across all K zeros
+    let lo = Math.max(deltaMin, pk.delta - 0.01);
+    let hi = Math.min(deltaMax, pk.delta + 0.01);
+    let span = hi - lo;
+    let x1 = hi - invPhiNum * span;
+    let x2 = lo + invPhiNum * span;
+    let f1 = evalSpecFast(x1);
+    let f2 = evalSpecFast(x2);
 
-    for (let it = 0; it < 14; it++) {
+    for (let it = 0; it < 18; it++) {
       if (f1 < f2) {
         lo = x1;
         x1 = x2;
         f1 = f2;
-        span = bdSub(hi, lo);
-        x2 = bdAdd(lo, bdMul(invPhi, span));
-        f2 = evalSpecBD(x2);
+        span = hi - lo;
+        x2 = lo + invPhiNum * span;
+        f2 = evalSpecFast(x2);
       } else {
         hi = x2;
         x2 = x1;
         f2 = f1;
-        span = bdSub(hi, lo);
-        x1 = bdSub(hi, bdMul(invPhi, span));
-        f1 = evalSpecBD(x1);
+        span = hi - lo;
+        x1 = hi - invPhiNum * span;
+        f1 = evalSpecFast(x1);
       }
     }
 
-    const bestDeltaBD = f1 >= f2 ? x1 : x2;
-    const bestScoreBD = f1 >= f2 ? f1 : f2;
+    const bestDeltaNum = f1 >= f2 ? x1 : x2;
+    const bestDeltaBD = bdFromNumber(bestDeltaNum);
+    const bestScoreBD = evalSpecBD(bestDeltaBD);
     const uPeakBD = bdAdd(halfLnN, bestDeltaBD);
 
     // Derive exact integer p_seed = round(sqrt(N) * exp(delta*)) in 530-digit BD500

@@ -47,6 +47,12 @@ export interface HgsTraceState {
   congruence: HgsCongruenceData | null;
   factorTree: HgsTreeNode | null;
   duration?: number;
+  activeWorkers?: number;
+  relRatePerSec?: number;
+  lpCollisions?: number;
+  partialCount?: number;
+  squfof2LpCount?: number;
+  blocksProcessed?: number;
 }
 
 interface HgsDashboardProps {
@@ -145,9 +151,15 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-[#E2DDD2] pb-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-xs font-mono text-[#1E3A8A]">
-              <span>HGS · Hybrid Geodesic Sieve</span>
+              <span>HGS · SIQS 32KB Tiled + SQUFOF</span>
               <span aria-hidden="true">·</span>
               <span className="font-bold">{nBits} {isRTL ? 'بت' : 'bits'}</span>
+              {trace?.activeWorkers && trace.activeWorkers > 1 ? (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-bold text-[#9A3412]">{trace.activeWorkers}× Workers</span>
+                </>
+              ) : null}
               <span aria-hidden="true">·</span>
               <span className="text-[#14532D] font-bold">X² ≡ Y² (mod N)</span>
             </div>
@@ -156,8 +168,8 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
             </h2>
             <p className="text-xs text-[#57534E] max-w-3xl leading-relaxed">
               {isRTL
-                ? 'تنفيذ كامل ومفتوح للأعداد الكبيرة بدون قيود خانات؛ يجمع بين كثير الحدود Q(x) = (x + ⌊√N⌋)² - N، وغربلة الكتل والمجالات بتقريب اللوغاريتمات لتجاوز آلاف القيم غير الملساء، وحل مصفوفة التكافؤ F₂ بالجبر الخطي واستخراج العوامل بالتطابق.'
-                : 'Moteur géodésique sans limite de chiffres : polynôme Q(x) = (x + ⌊√N⌋)² - N, crible par blocs logarithmique avec filtre Tonelli-Shanks, résolution matricielle F₂ et extraction par congruence.'}
+                ? 'غربلة SIQS متعددة الحدود بكود غراي بمصفوفات عمل مجزأة 32KB (TypedArrays) مع دلاء 17-بت حتى 90,000 عامل وعتبات لوغاريتمية مقطعية، وتقسيم 2LP السريع عبر SQUFOF (فلتر SQ64/63/65) على أنوية المتصفح وصولاً إلى Markowitz والحذف المنقول popcnt.'
+                : 'SIQS multi-polynômes Gray-Code par blocs de travail de 32 Ko (TypedArrays) avec seaux 17-bit (jusqu\'à 90k facteurs), seuils logarithmiques par morceaux, division SQUFOF 2LP (filtre SQ64/63/65) multi-cœurs et solveur Markowitz + élimination transposée popcnt.'}
             </p>
           </div>
 
@@ -190,7 +202,7 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
         </div>
 
         {/* Live Progress Bar & Sieve Diagnostics */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs font-mono">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs font-mono">
           <div className="p-3 bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg">
             <div className="flex justify-between items-center mb-1">
               <span className="text-[10px] text-[#78716C] uppercase font-bold">
@@ -206,6 +218,27 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
                 style={{ width: `${smoothProgress}%` }}
               />
             </div>
+            {trace && (trace.lpCollisions || trace.partialCount) ? (
+              <span className="text-[10px] text-[#14532D] block mt-1">
+                {isRTL
+                  ? `دورات 1LP/2LP: ${trace.lpCollisions || 0} (جزئية: ${trace.partialCount || 0})`
+                  : `Cycles 1LP/2LP: ${trace.lpCollisions || 0} (partielles: ${trace.partialCount || 0})`}
+              </span>
+            ) : null}
+          </div>
+
+          <div className="p-3 bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg">
+            <span className="text-[10px] text-[#78716C] uppercase font-bold block mb-1">
+              {isRTL ? 'السرعة و2LP SQUFOF' : 'Débit & 2LP SQUFOF'}
+            </span>
+            <span className="text-base font-bold text-[#1E3A8A] block">
+              {trace?.relRatePerSec ? `${trace.relRatePerSec.toFixed(1)} rel/s` : '0.0 rel/s'}
+            </span>
+            <span className="text-[10px] text-[#57534E] block mt-0.5">
+              {isRTL
+                ? `انقسامات SQUFOF: ${(trace?.squfof2LpCount || 0).toLocaleString()}`
+                : `Splits SQUFOF: ${(trace?.squfof2LpCount || 0).toLocaleString()}`}
+            </span>
           </div>
 
           <div className="p-3 bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg">
@@ -215,6 +248,11 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
             <span className="text-base font-bold text-[#1C1917] block">
               {trace ? trace.scannedCount.toLocaleString() : '0'}
             </span>
+            {trace?.blocksProcessed ? (
+              <span className="text-[10px] text-[#57534E] block mt-0.5">
+                {isRTL ? `مقاطع غربلة (32KB): ${trace.blocksProcessed.toLocaleString()}` : `Blocs 32 Ko: ${trace.blocksProcessed.toLocaleString()}`}
+              </span>
+            ) : null}
           </div>
 
           <div className="p-3 bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg">
@@ -284,14 +322,14 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
               </p>
             </div>
             <span className="px-2.5 py-1 bg-[#F4F0E8] border border-[#E2DDD2] rounded text-xs font-mono font-bold text-[#1E3A8A]">
-              |FB| = {trace?.factorBaseSize || 0}
+              |FB| = {(trace?.factorBaseSize || 0).toLocaleString()}
             </span>
           </div>
 
           {trace?.factorBase && trace.factorBase.length > 0 ? (
             <div className="space-y-2">
               <div className="flex flex-wrap gap-1 max-h-44 overflow-y-auto p-2 bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg font-mono text-xs">
-                {trace.factorBase.map((p, idx) => (
+                {trace.factorBase.slice(0, 180).map((p, idx) => (
                   <span
                     key={idx}
                     className={`px-2 py-0.5 rounded border text-[11px] ${
@@ -305,10 +343,15 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
                     {p}
                   </span>
                 ))}
+                {(trace.factorBaseSize || trace.factorBase.length) > 180 ? (
+                  <span className="px-2 py-0.5 rounded border border-[#E2DDD2] bg-[#F4F0E8] text-[#57534E] text-[11px] font-bold">
+                    +{((trace.factorBaseSize || trace.factorBase.length) - 180).toLocaleString()} {isRTL ? 'أولي آخر' : 'autres'}
+                  </span>
+                ) : null}
               </div>
               <div className="text-[10px] text-[#78716C] font-mono flex justify-between">
                 <span>{isRTL ? 'أصغر أولي: 2' : 'Min prime: 2'}</span>
-                <span>{isRTL ? `أكبر أولي: ${trace.factorBase[trace.factorBase.length - 1]}` : `Max prime: ${trace.factorBase[trace.factorBase.length - 1]}`}</span>
+                <span>{isRTL ? `أكبر أولي: ${trace.factorBase[trace.factorBase.length - 1].toLocaleString()}` : `Max prime: ${trace.factorBase[trace.factorBase.length - 1].toLocaleString()}`}</span>
               </div>
             </div>
           ) : (
@@ -516,8 +559,8 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
             </h3>
             <p className="text-xs text-[#57534E]">
               {isRTL
-                ? 'عرض هيكلي متسلسل لتفكيك العدد الطبيعي N إلى عوامله الأولية مع إثبات ميلر-رابين للأولية'
-                : 'Décomposition arborescente du nombre N en facteurs premiers avec preuve Miller-Rabin'}
+                ? 'عرض هيكلي لتفكيك N إلى عوامله مع التمييز بين الأولية الحتمية (≤64 بت) واختبار Baillie-PSW / بوكلينغتون (>64 بت)'
+                : 'Décomposition arborescente de N avec distinction entre primalité déterministe (<=64 bits) et Baillie-PSW / Pocklington (>64 bits)'}
             </p>
           </div>
           {trace?.congruence && (
@@ -560,14 +603,20 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
                       {isRTL ? 'العامل الأولي (p)' : 'Facteur (p)'}
                     </span>
                     <span className="px-2 py-0.5 bg-[#F0FDF4] border border-[#BBF7D0] text-[#166534] rounded text-[10px] font-bold">
-                      {trace.factorTree.left.isPrime ? (isRTL ? 'أولي مؤكد ✓' : 'Premier certifié ✓') : 'مركب'}
+                      {trace.factorTree.left.isPrime
+                        ? ((trace.factorTree.left.bits || 0) <= 64
+                          ? (isRTL ? 'أولي حتمي ≤64b ✓' : 'Premier déterministe ≤64b ✓')
+                          : (isRTL ? 'أولي محتمل قوي (MR/BPSW)' : 'Premier probable fort (MR/BPSW)'))
+                        : 'مركب'}
                     </span>
                   </div>
                   <span className="font-mono text-sm font-bold text-[#14532D] break-all select-all block mt-1">
                     {trace.factorTree.left.value}
                   </span>
                   <span className="text-[10px] text-[#78716C] font-mono block mt-1">
-                    {trace.factorTree.left.bits} bits · Miller-Rabin Verified
+                    {(trace.factorTree.left.bits || 0) <= 64
+                      ? `${trace.factorTree.left.bits} bits · Deterministic 12-base MR`
+                      : `${trace.factorTree.left.bits} bits · Probable Prime (see CMVE for Pocklington cert)`}
                   </span>
                 </div>
               )}
@@ -580,14 +629,20 @@ export const HgsDashboard: React.FC<HgsDashboardProps> = ({
                       {isRTL ? 'العامل الأولي (q)' : 'Facteur (q)'}
                     </span>
                     <span className="px-2 py-0.5 bg-[#F0FDF4] border border-[#BBF7D0] text-[#166534] rounded text-[10px] font-bold">
-                      {trace.factorTree.right.isPrime ? (isRTL ? 'أولي مؤكد ✓' : 'Premier certifié ✓') : 'مركب'}
+                      {trace.factorTree.right.isPrime
+                        ? ((trace.factorTree.right.bits || 0) <= 64
+                          ? (isRTL ? 'أولي حتمي ≤64b ✓' : 'Premier déterministe ≤64b ✓')
+                          : (isRTL ? 'أولي محتمل قوي (MR/BPSW)' : 'Premier probable fort (MR/BPSW)'))
+                        : 'مركب'}
                     </span>
                   </div>
                   <span className="font-mono text-sm font-bold text-[#1E3A8A] break-all select-all block mt-1">
                     {trace.factorTree.right.value}
                   </span>
                   <span className="text-[10px] text-[#78716C] font-mono block mt-1">
-                    {trace.factorTree.right.bits} bits · Miller-Rabin Verified
+                    {(trace.factorTree.right.bits || 0) <= 64
+                      ? `${trace.factorTree.right.bits} bits · Deterministic 12-base MR`
+                      : `${trace.factorTree.right.bits} bits · Probable Prime (see CMVE for Pocklington cert)`}
                   </span>
                 </div>
               )}

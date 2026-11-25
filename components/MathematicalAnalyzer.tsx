@@ -38,6 +38,8 @@ export const MathematicalAnalyzer: React.FC<MathematicalAnalyzerProps> = ({
 }) => {
   const [copiedP, setCopiedP] = useState(false);
   const [copiedQ, setCopiedQ] = useState(false);
+  const [copiedLambda, setCopiedLambda] = useState(false);
+  const [copiedPhi, setCopiedPhi] = useState(false);
   const [copiedSqrt500, setCopiedSqrt500] = useState(false);
   const [showFull500, setShowFull500] = useState(false);
   const isRTL = lang === 'ar';
@@ -153,34 +155,62 @@ export const MathematicalAnalyzer: React.FC<MathematicalAnalyzerProps> = ({
               </span>
             </div>
 
-            {/* Universal Exponent & Totient Invariants */}
+            {/* Universal Exponent & Totient Invariants (Displayed Completely) */}
             {expReport && (
               <>
-                <div className="bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2] space-y-1">
-                  <div className="flex items-center justify-between text-xs text-[#57534E]">
-                    <span>الأس العام الأصغر (دالة كارمايكل λ(N)):</span>
-                    <span className="text-[10px] text-[#14532D] font-mono font-bold">
-                      {expReport.isComplete ? '✓ دقيق' : 'ℹ مضمون بالأولية'}
-                    </span>
+                <div className="bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2] space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 text-xs text-[#57534E]">
+                    <span>الأس العام الأصغر الكامل (λ(N) Carmichael):</span>
+                    <div className="flex items-center gap-1.5" dir="ltr">
+                      <span className="text-[10px] text-[#14532D] font-mono font-bold">
+                        {expReport.isComplete ? `✓ ${expReport.lambdaBits}b` : 'ℹ مضمون'}
+                      </span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(expReport.lambdaN);
+                          setCopiedLambda(true);
+                          setTimeout(() => setCopiedLambda(false), 1800);
+                        }}
+                        className="text-[11px] px-2 py-0.5 rounded-sm bg-white border border-[#E2DDD2] text-[#1E3A8A]"
+                      >
+                        {copiedLambda ? t.copiedNotice : t.copyBtn}
+                      </button>
+                    </div>
                   </div>
-                  <div dir="ltr" className="font-mono-tabular text-xs text-[#1E3A8A] font-bold break-all select-all">
-                    {expReport.lambdaN.length > 40 ? `${expReport.lambdaN.slice(0, 36)}...` : expReport.lambdaN}
+                  <div dir="ltr" className="font-mono-tabular text-xs text-[#1E3A8A] font-bold break-all select-all max-h-40 overflow-y-auto bg-white p-2 rounded border border-[#E2DDD2]/70">
+                    {expReport.lambdaN}
                   </div>
                   <div className="text-[10px] text-[#57534E]">
                     أصغر أس m يحقق aᵐ ≡ 1 (mod N) لكل a أولي نسبياً مع N.
                   </div>
                 </div>
 
-                <div className="bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2] space-y-1">
-                  <div className="flex items-center justify-between text-xs text-[#57534E]">
-                    <span>مؤشر أويلر φ(N) والأس العام e:</span>
-                    <span className="text-[10px] text-[#1E3A8A] font-mono font-bold">e = {expReport.publicExponentE}</span>
+                <div className="bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2] space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 text-xs text-[#57534E]">
+                    <span>مؤشر أويلر الكامل φ(N) والأس e:</span>
+                    <div className="flex items-center gap-1.5" dir="ltr">
+                      <span className="text-[10px] text-[#1E3A8A] font-mono font-bold">
+                        {expReport.isComplete && expReport.publicExponentE
+                          ? `e_min = ${expReport.minimalPublicExponentE || expReport.publicExponentE} · e = ${expReport.publicExponentE}`
+                          : 'e = بانتظار λ(N)'}
+                      </span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(expReport.phiN);
+                          setCopiedPhi(true);
+                          setTimeout(() => setCopiedPhi(false), 1800);
+                        }}
+                        className="text-[11px] px-2 py-0.5 rounded-sm bg-white border border-[#E2DDD2] text-[#14532D]"
+                      >
+                        {copiedPhi ? t.copiedNotice : t.copyBtn}
+                      </button>
+                    </div>
                   </div>
-                  <div dir="ltr" className="font-mono-tabular text-xs text-[#1C1917] font-bold break-all select-all">
-                    {expReport.phiN.length > 40 ? `${expReport.phiN.slice(0, 36)}...` : expReport.phiN}
+                  <div dir="ltr" className="font-mono-tabular text-xs text-[#1C1917] font-bold break-all select-all max-h-40 overflow-y-auto bg-white p-2 rounded border border-[#E2DDD2]/70">
+                    {expReport.phiN}
                   </div>
                   <div className="text-[10px] text-[#57534E]">
-                    نسبة الاختصار φ/λ: {expReport.reductionRatio} · gcd(e, λ(N)) = 1.
+                    نسبة الاختصار φ/λ: {expReport.reductionRatio} · gcd(e, λ(N)) = {expReport.gcdEWithLambda}.
                   </div>
                 </div>
               </>

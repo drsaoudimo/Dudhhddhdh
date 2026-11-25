@@ -1,6 +1,17 @@
 import { getWorkerMontRedcCode } from './lib/montgomeryRedcKernel';
 
 export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
+  let isPaused = false;
+  let pauseStartedAt = 0;
+  let totalPausedMs = 0;
+  let activeWorkerId = 0;
+  const pauseWaiters = [];
+  const waitIfPaused = async () => {
+    while (isPaused) {
+      await new Promise(res => { pauseWaiters.push(res); });
+    }
+  };
+
   const gcd = (a, b) => {
     let x = a < 0n ? -a : a;
     let y = b < 0n ? -b : b;
@@ -368,13 +379,14 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
   const LOG_SCALE = 1.35;
 
   // Split 2LP remainder (q1 * q2 with both <= lpBound) using fast bounded Pollard-Brent
+  const MAX_SAFE_INT_BIG = 9007199254740991n;
   const splitDoubleLargePrime = (rem, lpBoundBig, seedBase) => {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const g = runPollardBrent(rem, 1100, seedBase + attempt * 19);
+      const g = runPollardBrent(rem, 900, seedBase + attempt * 19);
       if (g && g > 1n && g < rem) {
         const p1 = g;
         const p2 = rem / g;
-        if (p1 <= lpBoundBig && p2 <= lpBoundBig && isProbablePrime(p1, 5) && isProbablePrime(p2, 5)) {
+        if (p1 <= lpBoundBig && p2 <= lpBoundBig && isProbablePrime(p1, 4) && isProbablePrime(p2, 4)) {
           return p1 <= p2 ? [p1, p2] : [p2, p1];
         }
         return null;
@@ -383,7 +395,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
     return null;
   };
 
-  // Factor candidate residue Q(x) at sieve index idx using O(1) modular root filter (idx % p === start1 || start2) + 1LP/2LP capture
+  // Factor candidate residue Q(x) at sieve index idx using O(1) modular root filter + IEEE-754 Number fast drop
   const factorSiqsCandidateFast = (
     Q,
     X,
@@ -425,7 +437,8 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
       }
       if ((cnt & 1) === 1) sparseCols.push(col);
       const half = cnt >> 1;
-      if (half > 0) extraSquare = (extraSquare * modPow(pBig, BigInt(half), N)) % N;
+      if (half === 1) extraSquare = (extraSquare * pBig) % N;
+      else if (half > 1) extraSquare = (extraSquare * modPow(pBig, BigInt(half), N)) % N;
     }
 
     // 2. Divide small primes (< 11) directly without having written them into sieve array
@@ -445,7 +458,8 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
           }
           if ((cnt & 1) === 1) sparseCols.push(col);
           const half = cnt >> 1;
-          if (half > 0) extraSquare = (extraSquare * modPow(2n, BigInt(half), N)) % N;
+          if (half === 1) extraSquare = (extraSquare << 1n) % N;
+          else if (half > 1) extraSquare = (extraSquare * modPow(2n, BigInt(half), N)) % N;
         }
       } else {
         const pBig = fbPrimesBig[col];
@@ -457,35 +471,60 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
           } while (rem % pBig === 0n);
           if ((cnt & 1) === 1) sparseCols.push(col);
           const half = cnt >> 1;
-          if (half > 0) extraSquare = (extraSquare * modPow(pBig, BigInt(half), N)) % N;
+          if (half === 1) extraSquare = (extraSquare * pBig) % N;
+          else if (half > 1) extraSquare = (extraSquare * modPow(pBig, BigInt(half), N)) % N;
         }
       }
       if (rem === 1n) break;
     }
 
-    // 3. Fast 32-bit modular filter for all FB primes >= 11:
-    // p | Q_reduced(x) <=> (idx % p) === start1Arr[i] || (idx % p) === start2Arr[i]
-    if (rem > 1n) {
-      for (let i = firstSievingIdx; i < fbLen; i++) {
+    // 3. Fast 32-bit modular filter for all FB primes >= 11 with zero-alloc IEEE-754 Number drop once rem <= 2^53 - 1
+    let i = firstSievingIdx;
+    while (i < fbLen && rem > MAX_SAFE_INT_BIG) {
+      const s1 = start1Arr[i];
+      if (s1 >= 0) {
+        const p = fbPrimes[i];
+        const rMod = idx % p;
+        if (rMod === s1 || rMod === start2Arr[i]) {
+          const pBig = fbPrimesBig[i];
+          if (rem % pBig === 0n) {
+            let cnt = 0;
+            do {
+              rem /= pBig;
+              cnt++;
+            } while (rem % pBig === 0n);
+            if ((cnt & 1) === 1) sparseCols.push(i);
+            const half = cnt >> 1;
+            if (half === 1) extraSquare = (extraSquare * pBig) % N;
+            else if (half > 1) extraSquare = (extraSquare * modPow(pBig, BigInt(half), N)) % N;
+            if (rem === 1n) break;
+          }
+        }
+      }
+      i++;
+    }
+
+    if (rem > 1n && rem <= MAX_SAFE_INT_BIG && i < fbLen) {
+      let remNum = Number(rem);
+      for (; i < fbLen && remNum > 1; i++) {
         const s1 = start1Arr[i];
         if (s1 < 0) continue;
         const p = fbPrimes[i];
         const rMod = idx % p;
         if (rMod !== s1 && rMod !== start2Arr[i]) continue;
-
-        const pBig = fbPrimesBig[i];
-        if (rem % pBig === 0n) {
+        if (remNum % p === 0) {
           let cnt = 0;
           do {
-            rem /= pBig;
+            remNum = Math.floor(remNum / p);
             cnt++;
-          } while (rem % pBig === 0n);
+          } while (remNum % p === 0);
           if ((cnt & 1) === 1) sparseCols.push(i);
           const half = cnt >> 1;
-          if (half > 0) extraSquare = (extraSquare * modPow(pBig, BigInt(half), N)) % N;
-          if (rem === 1n) break;
+          if (half === 1) extraSquare = (extraSquare * fbPrimesBig[i]) % N;
+          else if (half > 1) extraSquare = (extraSquare * modPow(fbPrimesBig[i], BigInt(half), N)) % N;
         }
       }
+      rem = BigInt(remNum);
     }
 
     if (rem === 1n) {
@@ -543,7 +582,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
    * - Updates start1Arr/start2Arr directly via Gray-code deltas.
    * - 4-wide Uint32Array & 0x80808080 threshold scan + 32-bit (idx % p) trial filter + 1LP/2LP capture.
    */
-  const runSiqsPolyFamily = (
+  const runSiqsPolyFamily = async (
     N,
     targetM,
     fbPrimes,
@@ -595,7 +634,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
 
     const autoHalfWidth = baseHalfWidth > 0
       ? baseHalfWidth
-      : (nBits >= 165 ? 32768 : (nBits >= 125 ? 16384 : 8192));
+      : (nBits >= 215 ? 49152 : (nBits >= 155 ? 32768 : (nBits >= 105 ? 16384 : 8192)));
 
     let rowScale = 1.0;
     let activeRowIdx = 0;
@@ -605,14 +644,15 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
       const rawS = Number(sieveWeights.rowMedians[activeRowIdx]) || 1;
       rowScale = Math.min(1.5, Math.max(0.85, rawS >= 1.15 ? rawS : 1.0 + (rawS - 0.85) * 0.25));
     }
+    const zetaScale = sieveWeights && typeof sieveWeights.zetaWidthScale === 'number' ? sieveWeights.zetaWidthScale : 1.0;
 
-    const rawHalf = Math.round((autoHalfWidth * rowScale) / 64) * 64;
-    const sieveHalfWidth = Math.min(49152, Math.max(6144, rawHalf));
+    const rawHalf = Math.round((autoHalfWidth * rowScale * zetaScale) / 64) * 64;
+    const sieveHalfWidth = Math.min(65536, Math.max(6144, rawHalf));
     const totalLen = 2 * sieveHalfWidth;
     const numWords = totalLen >>> 2;
 
     if (!siqsCache.sieveBuffer || siqsCache.sieveBuffer.byteLength < totalLen) {
-      const allocLen = Math.max(totalLen, 98304);
+      const allocLen = Math.max(totalLen, 131072);
       siqsCache.sieveBuffer = new ArrayBuffer(allocLen);
       siqsCache.sieveU8 = new Uint8Array(siqsCache.sieveBuffer);
       siqsCache.sieveU32 = new Uint32Array(siqsCache.sieveBuffer);
@@ -787,7 +827,8 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
       }
     }
 
-    // Estimate max |Q_reduced| and configure 4-wide sign-bit threshold (0x80), accounting for skipped p < 11 primes
+    // Estimate max |Q_reduced| and calibrate 4-wide sign-bit threshold tightly to lpBoundSq
+    // Avoids wasting 90% of CPU on non-smooth candidates with rem > lpBoundSq
     const mBig = BigInt(sieveHalfWidth);
     const qCenterApprox = M / A;
     const qEdgeApprox = A * mBig * mBig;
@@ -795,17 +836,31 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
     const approxQBits = Math.max(14, maxQEst.toString(2).length);
     const lpBits = Math.log2(Number(largePrimeBoundBig));
     const subBits = allow2LP
-      ? (nBits >= 170 ? Math.min(54, Math.round(lpBits * 2.0 + 12)) : Math.min(50, Math.round(lpBits * 1.9 + 11)))
-      : Math.min(32, Math.round(lpBits * 1.15 + 9));
-    const minNeededScore = Math.min(118, Math.max(6, Math.round((approxQBits - subBits) * LOG_SCALE)));
+      ? Math.round(Math.min(lpBits * 2.0 + 7.5, lpBits * 1.96 + 8.5))
+      : Math.round(lpBits * 1.05 + 5.0);
+    const minNeededScore = Math.min(120, Math.max(6, Math.round((approxQBits - subBits) * LOG_SCALE)));
     const initVal = Math.max(4, 128 - minNeededScore);
     const initWord = (initVal | (initVal << 8) | (initVal << 16) | (initVal << 24)) >>> 0;
 
     const totalPolys = 1 << Math.max(0, numExtra);
     const relations = [];
+    let candsTested = 0;
+    let squfof2Lp = 0;
     let prevGray = 0;
+    let lastPausePollMs = Date.now();
 
     for (let m = 0; m < totalPolys; m++) {
+      if (isPaused) {
+        await waitIfPaused();
+        lastPausePollMs = Date.now();
+      } else if ((m & 3) === 3) {
+        const nowPoll = Date.now();
+        if (nowPoll - lastPausePollMs >= 35) {
+          lastPausePollMs = nowPoll;
+          await new Promise(r => setTimeout(r, 0));
+          if (isPaused) await waitIfPaused();
+        }
+      }
       if (m > 0) {
         const currGray = m ^ (m >> 1);
         const diff = prevGray ^ currGray;
@@ -888,6 +943,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
               if (g > 1n && g < N) return { relations, directFactor: g, polysProcessed: m + 1, sieveHalfWidth, rowScale, activeRowIdx };
               continue;
             }
+            candsTested++;
             const res = factorSiqsCandidateFast(
               Q,
               X,
@@ -905,15 +961,18 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
             );
             if (!res) continue;
             if (res.directFactor) {
-              return { relations, directFactor: res.directFactor, polysProcessed: m + 1, sieveHalfWidth, rowScale, activeRowIdx };
+              return { relations, directFactor: res.directFactor, polysProcessed: m + 1, sieveHalfWidth, rowScale, activeRowIdx, candsTested, squfof2Lp };
             }
-            if (res.relation) relations.push(res.relation);
+            if (res.relation) {
+              if (res.relation.largePrime2) squfof2Lp++;
+              relations.push(res.relation);
+            }
           }
         }
       }
     }
 
-    return { relations, directFactor: null, polysProcessed: totalPolys, sieveHalfWidth, rowScale, activeRowIdx };
+    return { relations, directFactor: null, polysProcessed: totalPolys, sieveHalfWidth, rowScale, activeRowIdx, candsTested, squfof2Lp };
   };
 
   const FERMAT_QR64 = (() => {
@@ -1095,7 +1154,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
       self.postMessage({ type: 'chronos_redc_benchmark', ...redcBench });
     }
 
-    if ((role === 'ecm' || nBits > 220) && sharedMontCtx) {
+    if ((role === 'ecm' || nBits > 272) && sharedMontCtx) {
       if (workerId === 0) {
         const pm1B1 = nBits > 500 ? 80000 : 30000;
         const pm1B2 = nBits > 500 ? 900000 : 240000;
@@ -1202,11 +1261,14 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
     let cycle = 0;
     let totalCurves = 0;
     let totalPolys = 0;
+    let totalCands = 0;
+    let totalSqufof2Lp = 0;
     let smoothRelationsCount = 0;
     let steps = 0;
     let lastTelemetryTime = Date.now();
     let lastYieldTime = Date.now();
     let lastBatchFlushTime = Date.now();
+    const sieveStartTime = Date.now();
     let pendingRelations = [];
     let lastHalfWidth = 32768;
     let lastRowScale = 1;
@@ -1221,9 +1283,10 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
     ];
 
     while (true) {
+      if (isPaused) await waitIfPaused();
       cycle++;
 
-      if (role === 'ecm' || nBits > 220 || !fbPrimes || fbPrimes.length < 8) {
+      if (role === 'ecm' || nBits > 272 || !fbPrimes || fbPrimes.length < 8) {
         const tier = cycle <= ecmSchedule.length
           ? ecmSchedule[cycle - 1]
           : { b1: 110000 + (cycle - 4) * 75000, b2: (110000 + (cycle - 4) * 75000) * 24, curves: 4 };
@@ -1232,6 +1295,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
         const primesB1 = getPrimesUpTo(b1);
 
         for (let c = 0; c < tier.curves; c++) {
+          if (isPaused) await waitIfPaused();
           totalCurves++;
           steps += Math.round(b1 / 8);
           const gammaPerturb = BigInt(Math.floor(ZETA_ZEROS[(c + workerId) % ZETA_ZEROS.length] * 1000));
@@ -1287,11 +1351,13 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
           }
         }
 
+        if (isPaused) await waitIfPaused();
         const brentDeep = runPollardBrent(targetN, nBits > 220 ? 12000 : 30000, workerId + cycle * 97 + seedOffset, zetaRhoSeed);
         if (brentDeep && brentDeep > 1n && brentDeep < targetN) return brentDeep;
         await new Promise(r => setTimeout(r, 1));
+        if (isPaused) await waitIfPaused();
       } else {
-        const siqsRes = runSiqsPolyFamily(
+        const siqsRes = await runSiqsPolyFamily(
           targetN,
           targetM,
           fbPrimes,
@@ -1308,6 +1374,8 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
         );
         familyIdx += Math.max(1, siqsTotalWorkers);
         totalPolys += siqsRes.polysProcessed || 1;
+        totalCands += siqsRes.candsTested || 0;
+        totalSqufof2Lp += siqsRes.squfof2Lp || 0;
         lastHalfWidth = siqsRes.sieveHalfWidth || lastHalfWidth;
         lastRowScale = siqsRes.rowScale || 1;
         lastRowIdx = siqsRes.activeRowIdx || 0;
@@ -1325,6 +1393,8 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
 
         const now = Date.now();
         if (pendingRelations.length >= 24 || (pendingRelations.length > 0 && now - lastBatchFlushTime >= 110)) {
+          const batchDurationMs = Math.max(1, now - lastBatchFlushTime);
+          const activeElapsedSec = Math.max(0.05, (now - sieveStartTime - totalPausedMs) / 1000);
           lastBatchFlushTime = now;
           self.postMessage({
             type: 'chronos_relations_batch',
@@ -1333,6 +1403,10 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
             source: sieveMode === 'v4-fallback' ? 'SIQS-v4' : 'SIQS-Vanilla',
             sieveMode,
             polysProcessed: totalPolys,
+            polysPerSec: Number((totalPolys / activeElapsedSec).toFixed(1)),
+            candsTested: totalCands,
+            squfof2Lp: totalSqufof2Lp,
+            batchDurationMs,
             sieveHalfWidth: lastHalfWidth,
             rowScale: lastRowScale,
             activeRowIdx: lastRowIdx,
@@ -1359,6 +1433,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
         if (now - lastYieldTime >= 140) {
           lastYieldTime = now;
           await new Promise(r => setTimeout(r, 0));
+          if (isPaused) await waitIfPaused();
         }
       }
     }
@@ -1494,6 +1569,7 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
   self.onmessage = async (e) => {
     const {
       type,
+      cmd,
       n,
       targetM,
       role = 'siqs',
@@ -1510,8 +1586,38 @@ export const CHRONOS_WORKER_CODE = getWorkerMontRedcCode() + `
       sieveWeights = null,
       zetaSigmaSeed = null,
       zetaRhoSeed = null
-    } = e.data;
+    } = e.data || {};
+
+    if (type === 'pause' || cmd === 'pause') {
+      if (!isPaused) {
+        isPaused = true;
+        pauseStartedAt = Date.now();
+        self.postMessage({ type: 'worker_pause_ack', workerId: activeWorkerId, paused: true });
+      }
+      return;
+    }
+
+    if (type === 'resume' || cmd === 'resume') {
+      if (isPaused) {
+        isPaused = false;
+        if (pauseStartedAt > 0) {
+          totalPausedMs += Math.max(0, Date.now() - pauseStartedAt);
+          pauseStartedAt = 0;
+        }
+        while (pauseWaiters.length > 0) {
+          const resolve = pauseWaiters.shift();
+          if (resolve) resolve();
+        }
+        self.postMessage({ type: 'worker_pause_ack', workerId: activeWorkerId, paused: false });
+      }
+      return;
+    }
+
     if (type === 'start') {
+      activeWorkerId = workerId;
+      isPaused = false;
+      pauseStartedAt = 0;
+      totalPausedMs = 0;
       try {
         const N = BigInt(n);
         const M = targetM ? BigInt(targetM) : N;

@@ -237,10 +237,15 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
 
     const chunks = prep.chunks;
     const chunkLen = chunks.length;
+    const earlyCheckIdx = chunkLen > 45 ? 20 : chunkLen;
+    const earlyCapBig = twoLpCapBig << 56n;
     let cIdx = 0;
 
     // Step 2: 52-bit grouped BigInt % chunk tests while rem > 2^53 - 1
     while (cIdx < chunkLen && rem > MAX_SAFE_BIG) {
+      if (cIdx === earlyCheckIdx && rem === Q && rem > earlyCapBig) {
+        return null;
+      }
       const ch = chunks[cIdx++];
       const modChunk = Number(rem % ch.prodBig);
       if (modChunk === 0 || gcdNum(modChunk, ch.prodNum) > 1) {
@@ -258,10 +263,11 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
             } while (rem % pBig === 0n);
             if ((cnt & 1) === 1) sparseCols.push(cols[j]);
             const half = cnt >> 1;
-            if (half > 0) {
+            if (half === 1) {
+              extraM = montCtx ? montCtx.montMul(extraM, modsNM[j]) : (extraM * pBig) % N;
+            } else if (half > 1) {
               if (montCtx) {
-                const pPowM = half === 1 ? modsNM[j] : montCtx.montPow(modsNM[j], BigInt(half));
-                extraM = montCtx.montMul(extraM, pPowM);
+                extraM = montCtx.montMul(extraM, montCtx.montPow(modsNM[j], BigInt(half)));
               } else {
                 extraM = (extraM * modPow(pBig, BigInt(half), N)) % N;
               }
@@ -376,17 +382,59 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
     return null;
   };
 
+  let isPaused = false;
+  let pauseStartedAt = 0;
+  let totalPausedMs = 0;
+  let activeWorkerId = 0;
+  const pauseWaiters = [];
+  const waitIfPaused = async () => {
+    while (isPaused) {
+      await new Promise(res => { pauseWaiters.push(res); });
+    }
+  };
+
   self.onmessage = async (e) => {
     const {
       type,
+      cmd,
+      workerId = 0,
       n,
       kMultiplier = 1,
       fbPrimes = [],
       fbGlobalIndices = null,
       largePrimeBound = 500000
-    } = e.data;
+    } = e.data || {};
+
+    if (type === 'pause' || cmd === 'pause') {
+      if (!isPaused) {
+        isPaused = true;
+        pauseStartedAt = Date.now();
+        self.postMessage({ type: 'worker_pause_ack', workerId: activeWorkerId, paused: true });
+      }
+      return;
+    }
+
+    if (type === 'resume' || cmd === 'resume') {
+      if (isPaused) {
+        isPaused = false;
+        if (pauseStartedAt > 0) {
+          totalPausedMs += Math.max(0, Date.now() - pauseStartedAt);
+          pauseStartedAt = 0;
+        }
+        while (pauseWaiters.length > 0) {
+          const resolve = pauseWaiters.shift();
+          if (resolve) resolve();
+        }
+        self.postMessage({ type: 'worker_pause_ack', workerId: activeWorkerId, paused: false });
+      }
+      return;
+    }
 
     if (type !== 'start') return;
+    activeWorkerId = workerId;
+    isPaused = false;
+    pauseStartedAt = 0;
+    totalPausedMs = 0;
 
     try {
       const N = BigInt(n);
@@ -479,6 +527,9 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
       const maxSteps = 4000000;
 
       while (step < maxSteps) {
+        if (isPaused) {
+          await waitIfPaused();
+        }
         const P_next = a * Q - P;
         const Q_next = (M - P_next * P_next) / Q;
 
@@ -616,14 +667,22 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
         step++;
 
         if ((step & 127) === 0 || batch.length >= 24) {
+          if (isPaused) {
+            await waitIfPaused();
+          }
           const now = Date.now();
           if (batch.length >= 24 || (batch.length > 0 && now - lastBatchFlushTime >= 90)) {
+            const batchDurationMs = Math.max(1, now - lastBatchFlushTime);
+            const activeElapsedSec = Math.max(0.05, (now - startTime - totalPausedMs) / 1000);
             lastBatchFlushTime = now;
             self.postMessage({
               type: 'cfrac_relations_batch',
+              workerId: activeWorkerId,
               targetN: N.toString(),
               kMultiplier,
               steps: step,
+              stepsPerSec: Math.round(step / activeElapsedSec),
+              batchDurationMs,
               smoothCount,
               partialCount,
               convergentsSample,
@@ -636,6 +695,7 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
             lastReportTime = now;
             self.postMessage({
               type: 'cfrac_progress',
+              workerId: activeWorkerId,
               kMultiplier,
               steps: step,
               smoothCount,
@@ -647,6 +707,7 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
           if (now - lastYieldTime >= 45) {
             lastYieldTime = now;
             await new Promise(r => setTimeout(r, 0));
+            if (isPaused) await waitIfPaused();
           }
         }
 
@@ -663,11 +724,16 @@ export const CFRAC_WORKER_CODE = getWorkerMontRedcCode() + `
       }
 
       if (batch.length > 0) {
+        const now = Date.now();
+        const activeElapsedSec = Math.max(0.05, (now - startTime - totalPausedMs) / 1000);
         self.postMessage({
           type: 'cfrac_relations_batch',
+          workerId: activeWorkerId,
           targetN: N.toString(),
           kMultiplier,
           steps: step,
+          stepsPerSec: Math.round(step / activeElapsedSec),
+          batchDurationMs: Math.max(1, now - lastBatchFlushTime),
           smoothCount,
           partialCount,
           convergentsSample,

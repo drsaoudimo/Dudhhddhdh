@@ -42,8 +42,54 @@ export interface WienerAttackResult {
   verifiedProduct: boolean;
   verifiedPrimes: boolean;
   durationMs: number;
+  strategyUsed?: 'classic-wiener' | 'lambda-quotient' | 'verheul-van-tilborg' | 'boneh-durfee-lll' | 'any-method-recovery' | 'none';
+  reasonCode?: 'broken' | 'e-too-small' | 'beyond-bound';
   notesAr: string;
 }
+
+const QR64_WIENER = new Uint8Array(64);
+[0, 1, 4, 9, 16, 17, 25, 33, 36, 41, 49, 57].forEach(v => {
+  QR64_WIENER[v] = 1;
+});
+
+const tryVerifyKD = (
+  N: bigint,
+  e: bigint,
+  kCand: bigint,
+  dCand: bigint
+): { p: bigint; q: bigint; dTrue: bigint; isLambdaQuotient: boolean } | null => {
+  if (kCand <= 0n || dCand <= 0n) return null;
+  const prod = e * dCand;
+  const rem = prod % kCand;
+  if (rem === 0n || rem > 2048n) return null;
+  const phi = (prod - rem) / kCand;
+  if (phi <= 0n || phi >= N) return null;
+
+  const sumPQ = N - phi + 1n;
+  if (sumPQ <= 0n || (sumPQ & 1n) !== 0n) return null;
+  const halfS = sumPQ >> 1n;
+  const disc = halfS * halfS - N;
+  if (disc < 0n) return null;
+  if (!QR64_WIENER[Number(disc & 63n)]) return null;
+
+  const r = bigIntSqrt(disc);
+  if (r * r !== disc) return null;
+  const p = halfS - r;
+  const qFactor = halfS + r;
+  if (p > 1n && qFactor > 1n && p * qFactor === N) {
+    // Reconstruct minimal verified private exponent d from true φ(N) or λ(N)
+    const phiExact = (p - 1n) * (qFactor - 1n);
+    const lambdaExact = phiExact / gcd(p - 1n, qFactor - 1n);
+    const dTrue =
+      gcd(e, phiExact) === 1n
+        ? modInverse(e, phiExact)
+        : gcd(e, lambdaExact) === 1n
+        ? modInverse(e, lambdaExact)
+        : dCand;
+    return { p, q: qFactor, dTrue, isLambdaQuotient: rem > 1n };
+  }
+  return null;
+};
 
 export const runWienerAttack = (N: bigint, e: bigint): WienerAttackResult => {
   const t0 = performance.now();
@@ -57,6 +103,47 @@ export const runWienerAttack = (N: bigint, e: bigint): WienerAttackResult => {
   let dPrev = 1n, dCurr = 0n;
   let idx = 0;
   const traceSample: WienerConvergentStep[] = [];
+  const convergents: Array<{ q: bigint; k: bigint; d: bigint; kPrev: bigint; dPrev: bigint }> = [];
+
+  const makeSuccess = (
+    p: bigint,
+    qFactor: bigint,
+    dFinal: bigint,
+    kFinal: bigint,
+    quotient: bigint,
+    strategyUsed: WienerAttackResult['strategyUsed'],
+    labelAr: string
+  ): WienerAttackResult => {
+    const validPhi = true;
+    traceSample.push({
+      index: idx,
+      quotient: quotient.toString().slice(0, 16),
+      k: kFinal.toString(),
+      d: dFinal.toString(),
+      dBits: bitLen(dFinal),
+      phiCandidateValid: validPhi
+    });
+    const primesOk = isProbablePrime(p, 12) && isProbablePrime(qFactor, 12);
+    const durationMs = Math.max(1, Math.round((performance.now() - t0) * 100) / 100);
+    return {
+      success: true,
+      nBits,
+      eBits,
+      wienerBoundBits,
+      convergentsTested: idx,
+      traceSample: traceSample.slice(-12),
+      recoveredD: dFinal.toString(),
+      recoveredK: kFinal.toString(),
+      factorP: p.toString(),
+      factorQ: qFactor.toString(),
+      verifiedProduct: true,
+      verifiedPrimes: primesOk,
+      durationMs,
+      strategyUsed,
+      reasonCode: 'broken',
+      notesAr: `${labelAr} في ${durationMs} مللي ثانية (|d| = ${bitLen(dFinal)} بت).`
+    };
+  };
 
   while (b !== 0n && idx < 4096) {
     const q = a / b;
@@ -64,6 +151,8 @@ export const runWienerAttack = (N: bigint, e: bigint): WienerAttackResult => {
     a = b;
     b = rem;
 
+    const oldKPrev = kPrev;
+    const oldDPrev = dPrev;
     const kNext = q * kCurr + kPrev;
     const dNext = q * dCurr + dPrev;
     kPrev = kCurr;
@@ -72,47 +161,75 @@ export const runWienerAttack = (N: bigint, e: bigint): WienerAttackResult => {
     dCurr = dNext;
     idx++;
 
-    let validPhi = false;
-    if (kCurr > 0n && dCurr > 0n && (e * dCurr - 1n) % kCurr === 0n) {
-      const phi = (e * dCurr - 1n) / kCurr;
-      const sumPQ = N - phi + 1n;
-      if (sumPQ > 0n && (sumPQ & 1n) === 0n) {
-        const halfS = sumPQ >> 1n;
-        const disc = halfS * halfS - N;
-        if (disc >= 0n) {
-          const r = bigIntSqrt(disc);
-          if (r * r === disc) {
-            const p = halfS - r;
-            const qFactor = halfS + r;
-            if (p > 1n && qFactor > 1n && p * qFactor === N) {
-              validPhi = true;
-              traceSample.push({
-                index: idx,
-                quotient: q.toString().slice(0, 16),
-                k: kCurr.toString(),
-                d: dCurr.toString(),
-                dBits: bitLen(dCurr),
-                phiCandidateValid: true
-              });
-              const primesOk = isProbablePrime(p, 12) && isProbablePrime(qFactor, 12);
-              const durationMs = Math.max(1, Math.round((performance.now() - t0) * 100) / 100);
-              return {
-                success: true,
-                nBits,
-                eBits,
-                wienerBoundBits,
-                convergentsTested: idx,
-                traceSample: traceSample.slice(-12),
-                recoveredD: dCurr.toString(),
-                recoveredK: kCurr.toString(),
-                factorP: p.toString(),
-                factorQ: qFactor.toString(),
-                verifiedProduct: true,
-                verifiedPrimes: primesOk,
-                durationMs,
-                notesAr: `تم كسر مفتاح ${nBits} بت عبر تقاربي الكسر المستمر #${idx} واستعادة d (${bitLen(dCurr)} بت) في ${durationMs} مللي ثانية.`
-              };
+    convergents.push({ q, k: kCurr, d: dCurr, kPrev, dPrev });
+
+    // Pass 1: Exact convergent (handles both e*d ≡ 1 mod φ(N) and mod λ(N) via quotient residue)
+    const hit = tryVerifyKD(N, e, kCurr, dCurr);
+    if (hit) {
+      return makeSuccess(
+        hit.p,
+        hit.q,
+        hit.dTrue,
+        kCurr,
+        q,
+        hit.isLambdaQuotient ? 'lambda-quotient' : 'classic-wiener',
+        hit.isLambdaQuotient
+          ? `تم كسر مفتاح ${nBits} بت عبر متقاربة الكسر المستمر #${idx} مع تعميم λ(N)`
+          : `تم كسر مفتاح ${nBits} بت عبر متقاربة الكسر المستمر #${idx}`
+      );
+    }
+
+    // Also test immediate Dujella/Verheul-van Tilborg semi-convergents around bound window
+    const dBitsNow = bitLen(dCurr);
+    if (dPrev > 0n && (nBits <= 128 || (dBitsNow >= Math.max(1, wienerBoundBits - 14) && dBitsNow <= wienerBoundBits + 16))) {
+      for (let r = 1n; r <= 6n; r += 1n) {
+        for (let s = 0n; s <= 6n; s += 1n) {
+          if (r === 1n && s === 0n) continue;
+          const hitPlus = tryVerifyKD(N, e, r * kCurr + s * kPrev, r * dCurr + s * dPrev);
+          if (hitPlus) {
+            return makeSuccess(
+              hitPlus.p,
+              hitPlus.q,
+              hitPlus.dTrue,
+              r * kCurr + s * kPrev,
+              q,
+              'verheul-van-tilborg',
+              `تم كسر مفتاح ${nBits} بت (تجاوز حد فينر التقليدي) عبر شبه متقاربة Verheul–van Tilborg (${r}k_n + ${s}k_{n-1})`
+            );
+          }
+          if (s > 0n && r * dCurr > s * dPrev && r * kCurr > s * kPrev) {
+            const hitMinus = tryVerifyKD(N, e, r * kCurr - s * kPrev, r * dCurr - s * dPrev);
+            if (hitMinus) {
+              return makeSuccess(
+                hitMinus.p,
+                hitMinus.q,
+                hitMinus.dTrue,
+                r * kCurr - s * kPrev,
+                q,
+                'verheul-van-tilborg',
+                `تم كسر مفتاح ${nBits} بت (تجاوز حد فينر التقليدي) عبر شبه متقاربة Verheul–van Tilborg (${r}k_n - ${s}k_{n-1})`
+              );
             }
+          }
+        }
+      }
+      // Also test quotient steps j*k_{n-1} + k_{n-2} when q is large
+      if (q > 2n && oldDPrev > 0n) {
+        const maxJ = q < 16n ? q : 16n;
+        for (let j = 1n; j < maxJ; j += 1n) {
+          const kj = j * kPrev + oldKPrev;
+          const dj = j * dPrev + oldDPrev;
+          const hitQ = tryVerifyKD(N, e, kj, dj);
+          if (hitQ) {
+            return makeSuccess(
+              hitQ.p,
+              hitQ.q,
+              hitQ.dTrue,
+              kj,
+              q,
+              'verheul-van-tilborg',
+              `تم كسر مفتاح ${nBits} بت عبر شبه متقاربة Dujella (j=${j}) عند الخطوة #${idx}`
+            );
           }
         }
       }
@@ -125,12 +242,62 @@ export const runWienerAttack = (N: bigint, e: bigint): WienerAttackResult => {
         k: kCurr.toString().slice(0, 18),
         d: dCurr.toString().slice(0, 18),
         dBits: bitLen(dCurr),
-        phiCandidateValid: validPhi
+        phiCandidateValid: false
       });
     }
   }
 
+  // Pass 2: Expanded Verheul-van Tilborg sweep around N^0.25 if missed
+  for (const cv of convergents) {
+    const db = bitLen(cv.d);
+    if (cv.dPrev <= 0n || db < Math.max(1, wienerBoundBits - 10) || db > wienerBoundBits + 14) continue;
+    for (let r = 1n; r <= 12n; r += 1n) {
+      for (let s = 1n; s <= 12n; s += 1n) {
+        if (r <= 6n && s <= 6n) continue;
+        const h1 = tryVerifyKD(N, e, r * cv.k + s * cv.kPrev, r * cv.d + s * cv.dPrev);
+        if (h1) {
+          return makeSuccess(
+            h1.p,
+            h1.q,
+            h1.dTrue,
+            r * cv.k + s * cv.kPrev,
+            cv.q,
+            'verheul-van-tilborg',
+            `تم كسر مفتاح ${nBits} بت عبر توسعة Verheul–van Tilborg (${r}, ${s}) متجاوزاً حد فينر`
+          );
+        }
+      }
+    }
+  }
+
+  // Pass 3: Automatic Boneh-Durfee LLL Escalation (solves d up to ~N^0.275 when e is large)
+  if (eBits >= Math.max(16, Math.floor(nBits * 0.55))) {
+    const bdAttempt = runBonehDurfeeAttack(N, e, 0.264, 3, 1);
+    if (bdAttempt.success && bdAttempt.factorP && bdAttempt.factorQ && bdAttempt.recoveredD) {
+      const durationMs = Math.max(1, Math.round((performance.now() - t0) * 100) / 100);
+      return {
+        success: true,
+        nBits,
+        eBits,
+        wienerBoundBits,
+        convergentsTested: idx,
+        traceSample: traceSample.slice(-12),
+        recoveredD: bdAttempt.recoveredD,
+        recoveredK: bdAttempt.recoveredK,
+        factorP: bdAttempt.factorP,
+        factorQ: bdAttempt.factorQ,
+        verifiedProduct: bdAttempt.verifiedProduct,
+        verifiedPrimes: bdAttempt.verifiedPrimes,
+        durationMs,
+        strategyUsed: 'boneh-durfee-lll',
+        reasonCode: 'broken',
+        notesAr: `تجاوز الأس السري حد فينر (N^0.25 ≈ ${wienerBoundBits} بت)؛ تم التصعيد التلقائي إلى شبيكة Boneh–Durfee LLL (${bdAttempt.latticeDim}×${bdAttempt.latticeDim}) وكسر المفتاح بالكامل في ${durationMs} مللي ثانية!`
+      };
+    }
+  }
+
   const durationMs = Math.max(1, Math.round((performance.now() - t0) * 100) / 100);
+  const eIsTooSmall = eBits <= 32;
   return {
     success: false,
     nBits,
@@ -145,7 +312,11 @@ export const runWienerAttack = (N: bigint, e: bigint): WienerAttackResult => {
     verifiedProduct: false,
     verifiedPrimes: false,
     durationMs,
-    notesAr: `لم يُعثر على كسر تقاربي يحقق حد فينر (d < N^0.25 ≈ ${wienerBoundBits} بت)؛ جرّب هجوم Boneh–Durfee LLL للمدى حتى N^0.28.`
+    strategyUsed: 'none',
+    reasonCode: eIsTooSmall ? 'e-too-small' : 'beyond-bound',
+    notesAr: eIsTooSmall
+      ? `الأس العام المُدخل صغير جداً (e = ${e.toString()}، ${eBits} بت)؛ في هذه الحالة يكون الأس السري d ≈ N/e ≈ ${nBits - eBits} بت، وهو أكبر بكثير من حد فينر (${wienerBoundBits} بت) وحد Boneh–Durfee. الحل: احسب e ضعيفاً متوافقاً مع فينر أو صعّد المودول إلى Chronos v4 للتفكيك المباشر.`
+      : `تجاوز d حد فينر (${wienerBoundBits} بت) وحد شبه متقاربات Verheul–van Tilborg وتقليص Boneh–Durfee LLL (δ=0.264). يمكن تفكيك N مباشرة عبر محرك Chronos v4.`
   };
 };
 
@@ -1322,8 +1493,10 @@ def batch_gcd(moduli):
 // 7. AUTOMATIC PUBLIC EXPONENT COMPUTATION FOR CUSTOM MODULUS N
 // ============================================================================
 export interface AutoExponentResult {
-  e: string;
-  source: 'known-pq' | 'factored-fast' | 'prime-n' | 'standard-fallback';
+  e: string | null;
+  minimalE?: string;
+  minimalD?: string;
+  source: 'known-pq' | 'factored-fast' | 'prime-n' | 'unresolved-pending';
   phiComputed: boolean;
   dBits: number | null;
   factorMethod?: string;
@@ -1483,8 +1656,8 @@ export const autoComputePublicExponentForN = (
 ): AutoExponentResult => {
   if (N < 2n) {
     return {
-      e: '65537',
-      source: 'standard-fallback',
+      e: null,
+      source: 'unresolved-pending',
       phiComputed: false,
       dBits: null,
       notesAr: 'يرجى إدخال مودول N أكبر من أو يساوي 2.'
@@ -1492,16 +1665,28 @@ export const autoComputePublicExponentForN = (
   }
 
   const rep = computeUniversalExponentReport(N, mode, deltaTarget, hintP, hintQ);
-  
-  let source: AutoExponentResult['source'] = 'standard-fallback';
+
+  if (!rep.isComplete || !rep.publicExponentE) {
+    return {
+      e: null,
+      source: 'unresolved-pending',
+      phiComputed: false,
+      dBits: null,
+      factorMethod: rep.status,
+      notesAr: rep.explanationAr
+    };
+  }
+
+  let source: AutoExponentResult['source'] = 'factored-fast';
   if (rep.status === 'prime') source = 'prime-n';
   else if (rep.status === 'cached-factors') source = 'known-pq';
-  else if (rep.status === 'exact-factored' || rep.status === 'prime-power' || rep.status === 'even-split') source = 'factored-fast';
 
   return {
     e: rep.publicExponentE,
+    minimalE: rep.minimalPublicExponentE ?? undefined,
+    minimalD: rep.minimalPrivateExponentD ?? undefined,
     source,
-    phiComputed: rep.isComplete,
+    phiComputed: true,
     dBits: rep.dBits,
     factorMethod: rep.status,
     notesAr: rep.explanationAr,

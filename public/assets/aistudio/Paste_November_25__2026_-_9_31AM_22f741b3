@@ -1,0 +1,610 @@
+الاستعراض الرياضي التفصيلي للمعايير والبارامترات المعتمدة لغربال HGS لنطاق 260 إلى 820+ بت (نحو 80 إلى 247+ خانة):
+Thought for 2s
+Switched to Build mode
+تنفيذ غربال HGS المسرّع بكاش L1 وخوارزمية Shanks' SQUFOF المسرّعة وتقسيم 2LP عبر كافة أنوية المعالج.
+Switched to Build mode
+Thought for 4s
+قراءة محرك التفكيك الحالي والصفحة الرئيسية
+Thought for 2m 30s
+كتابة الرياضيات الأساسية للغربال وخوارزمية SQUFOF المسرّعة
+mkdir -p src/engine/hgs && cat > src/engine/hgs/math.ts <<'EOF'
+// Number-domain modular math + SIQS parameter table + factor base construction.
+export function primesUpTo(n: number): Int32Array {
+const s = new Uint8Array(n + 1); const out: number[] = n >= 2 ? [2] : [];
+for (let i = 3; i <= n; i += 2) if (!s[i]) { out.push(i); for (let j = i * i; j <= n; j += 2 * i) s[j] = 1; }
+return Int32Array.from(out);
+}
+// all operands < 2^26 so products stay exact in doubles
+export function mulmod(a: number, b: number, m: number) { return (a * b) % m; }
+export function powmod(b: number, e: number, m: number) { let r = 1; b %= m; while (e > 0) { if (e & 1) r = (r * b) % m; b = (b * b) % m; e = Math.floor(e / 2); } return r; }
+export function invMod(a: number, m: number): number {
+let [r0, r1, t0, t1] = [((a % m) + m) % m, m, 1, 0];
+while (r1) { const q = Math.floor(r0 / r1); [r0, r1] = [r1, r0 - q * r1]; [t0, t1] = [t1, t0 - q * t1]; }
+return ((t0 % m) + m) % m;
+}
+/** Tonelli–Shanks: x with x^2 ≡ n (mod p), n is a QR. */
+export function sqrtModP(n: number, p: number): number {
+n %= p; if (p === 2 || n === 0) return n;
+if (p % 4 === 3) return powmod(n, (p + 1) / 4, p);
+let q = p - 1, s = 0; while (q % 2 === 0) { q /= 2; s++; }
+let z = 2; while (powmod(z, (p - 1) / 2, p) !== p - 1) z++;
+let m = s, c = powmod(z, q, p), t = powmod(n, q, p), r = powmod(n, (q + 1) / 2, p);
+while (t !== 1) { let i = 0, tt = t; while (tt !== 1) { tt = (tt * tt) % p; i++; }
+let b = c; for (let j = 0; j < m - i - 1; j++) b = (b * b) % p;
+m = i; c = (b * b) % p; t = (t * c) % p; r = (r * b) % p; }
+return r;
+}
+export const bmod = (a: bigint, p: number) => { const r = Number(a % BigInt(p)); return r < 0 ? r + p : r; };
+export function bitlen(n: bigint) { return n.toString(2).length; }
+export function isqrtBig(n: bigint): bigint { if (n < 2n) return n; let x = BigInt(Math.floor(Math.sqrt(Number(n)))) ; if (x === 0n) x = 1n;
+for (;;) { const y = (x + n / x) >> 1n; if (y >= x) { if (x * x > n) { x--; continue; } return x; } x = y; } }
+/** Knuth–Schroeppel multiplier: maximises expected small-prime contribution of kN. */
+export function knuthSchroeppel(N: bigint): number {
+const ks = [1, 2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23, 26, 29, 30, 31, 33, 34, 35, 37, 38, 39, 41, 42, 43, 46, 47, 51, 53, 55, 57, 58, 59, 61, 62, 65, 66, 67, 69, 70, 71, 73];
+const ps = primesUpTo(1000); let best = 1, bestF = -Infinity;
+for (const k of ks) {
+const kN = N * BigInt(k); const m8 = Number(kN % 8n);
+let f = -0.5 * Math.log(k) + (m8 === 1 ? 2 * Math.log(2) : m8 === 5 ? Math.log(2) : m8 === 3 || m8 === 7 ? 0.5 * Math.log(2) : 0);
+for (let i = 1; i < ps.length; i++) { const p = ps[i]!; const r = bmod(kN, p);
+if (r === 0) f += Math.log(p) / p; else if (powmod(r, (p - 1) / 2, p) === 1) f += (2 * Math.log(p)) / (p - 1); }
+if (f > bestF) { bestF = f; best = k; }
+}
+return best;
+}
+export const BLOCK = 32768;
+/** Factor base size and half-interval M (multiple of the 32 KB L1 block) by decimal digits. */
+export function siqsParams(digits: number) {
+const T: [number, number, number][] = [[30, 200, 1], [40, 450, 1], [50, 1100, 2], [60, 2200, 2], [70, 4000, 3], [80, 6500, 4], [90, 11000, 6], [100, 18000, 8], [120, 40000, 12], [160, 90000, 16], [250, 120000, 32]];
+let i = 0; while (i < T.length - 2 && digits > T[i + 1]![0]) i++;
+const [d0, f0, b0] = T[i]!, [d1, f1, b1] = T[i + 1]!;
+const t = Math.min(1, Math.max(0, (digits - d0) / (d1 - d0)));
+return { fbSize: Math.round(f0 + t * (f1 - f0)), blocks: Math.max(1, Math.round(b0 + t * (b1 - b0))) };
+}
+export type FactorBase = { primes: Int32Array; sqrts: Int32Array; logp: Uint8Array };
+export function buildFactorBase(kN: bigint, size: number): FactorBase {
+const P: number[] = [], S: number[] = [];
+let lim = Math.max(1000, size * 30); let ps = primesUpTo(lim), i = 0;
+while (P.length < size) {
+if (i >= ps.length) { lim *= 2; ps = primesUpTo(lim); }
+const p = ps[i++]!; if (p === undefined) continue;
+const r = bmod(kN, p);
+if (p === 2) { P.push(2); S.push(r & 1); continue; }
+if (r === 0) { P.push(p); S.push(0); continue; }
+if (powmod(r, (p - 1) / 2, p) === 1) { P.push(p); S.push(sqrtModP(r, p)); }
+}
+const primes = Int32Array.from(P);
+return { primes, sqrts: Int32Array.from(S), logp: Uint8Array.from(P, (p) => Math.round(Math.log2(p))) };
+}
+EOF
+cat > src/engine/hgs/squfof.ts <<'EOF'
+// Shanks' SQUFOF on plain Numbers (n < 2^52): QR bitmask square filter, ring-free, multiplier fallback.
+const SQ64 = new Uint8Array(64), SQ63 = new Uint8Array(63), SQ65 = new Uint8Array(65);
+for (let i = 0; i < 64; i++) SQ64[(i * i) % 64] = 1;
+for (let i = 0; i < 63; i++) SQ63[(i * i) % 63] = 1;
+for (let i = 0; i < 65; i++) SQ65[(i * i) % 65] = 1;
+/** Returns sqrt(q) if q is a perfect square, else 0. Rejects ~99% of non-squares without sqrt. */
+export function squareRoot(q: number): number {
+if (!SQ64[q & 63] || !SQ63[q % 63] || !SQ65[q % 65]) return 0;
+const r = Math.round(Math.sqrt(q)); return r * r === q ? r : 0;
+}
+function gcd(a: number, b: number) { while (b) { const t = a % b; a = b; b = t; } return a; }
+const MULTS = [1, 3, 5, 7, 11, 15, 21, 33, 35, 55, 77, 105, 165, 231, 385, 1155];
+/** Non-trivial factor of an odd composite n < 2^52, or 0 on failure. */
+export function squfof(n: number): number {
+if (n % 2 === 0) return 2;
+const rt = Math.floor(Math.sqrt(n)); if (rt * rt === n) return rt;
+for (const k of MULTS) {
+const D = k * n; if (D >= 4503599627370496) break;
+const P0 = Math.floor(Math.sqrt(D)); let P = P0, Pprev = P0, Qprev = 1, Q = D - P0 * P0;
+if (Q === 0) continue;
+const L = 2 * Math.floor(Math.sqrt(2 * Math.sqrt(D))), B = 3 * L;
+let i = 2, r = 0, b = 0, q = 0;
+for (; i < B; i++) {
+b = Math.floor((P0 + P) / Q); P = b * Q - P; q = Q; Q = Qprev + b * (Pprev - P);
+if (!(i & 1) && (r = squareRoot(Q)) > 0) break;
+Qprev = q; Pprev = P;
+}
+if (i >= B) continue;
+b = Math.floor((P0 - P) / r); Pprev = P = b * r + P; Qprev = r; Q = (D - Pprev * Pprev) / Qprev;
+let j = 0;
+do { b = Math.floor((P0 + P) / Q); Pprev = P; P = b * Q - P; q = Q; Q = Qprev + b * (Pprev - P); Qprev = q; j++; } while (P !== Pprev && j < B);
+const f = gcd(n, Qprev);
+if (f !== 1 && f !== n) return f % k === 0 && f !== k ? f : f;
+}
+return 0;
+}
+EOF
+معيار اختيار المضاعف 
+ (مضاعف Knuth–Schroeppel)
+قبل توليد قاعدة العوامل، لا نغربل 
+ مباشرة بل 
+، حيث يُختار 
+ عديم المربعات (Square-Free) لتعظيم كثافة الأعداد الأولية الصغيرة التي لها بواقي تربيعية (أي 
+):
+[
+F(k, N) = -\frac{1}{2} \ln(k) + \sum_{p < p_{\text{KS}}} \frac{\ln(p)}{p-1} \cdot \delta(k, N, p)
+]
+حيث:
+ إذا كان 
+ بقية تربيعية، و 
+ إذا كان 
+، و 
+ إذا كان غير مربعي.
+نأخذ حد الفحص 
+ إلى 
+. المضاعف الأفضل يمنح ميزة تفوق 15% إلى 30% في وتيرة العلاقات الملساء.
+جدول ضبط قاعدة العوامل (
+) ونصف عرض الغربلة (
+)
+يتبع الغربال دالة التعقيد الحسابي 
+، وتُضبط المتغيرات تلقائياً وفق حجم الدخل بالبت:
+| نطاق الحجم (بت) | عدد الخانات المقابل | حجم قاعدة العوامل 
+ | الحد الأقصى 
+ | نصف القطر 
+ | عدد كتل L1 (سعة 32KB) | عدد عوامل 
+ (
+) |
+|---|---|---|---|---|---|---|
+| 260 – 320 | 78 – 96 | 3,500 – 6,000 | ~60,000 | 65,536 | 2 كتل | 3 – 4 |
+| 320 – 420 | 96 – 126 | 8,000 – 18,000 | ~200,000 | 131,072 | 4 كتل | 4 – 5 |
+| 420 – 540 | 126 – 162 | 25,000 – 50,000 | ~650,000 | 262,144 | 8 كتل | 5 – 7 |
+| 540 – 680 | 162 – 205 | 60,000 – 120,000 | ~1,800,000 | 524,288 | 16 كتلة | 7 – 9 |
+| 680 – 820+ | 205 – 247+ | 150,000 – 350,000 | ~5,500,000 | 1,048,576 | 32 كتلة | 9 – 12 |
+كثيرة الحدود والتهيئة الذاتية (Self-Initializing SIQS)
+كثيرة الحدود المستخدمة هي:
+[
+Q(x) = (Ax + B)^2 - kN = A (Ax^2 + 2Bx + C)
+]
+مع الشروط الرياضية:
+اختيار 
+: نختار 
+ كحاصل ضرب أعداد أولية فردية من خارج الـ 
+ (أو من أواخرها) بحيث يحقق الشرط الحجمي:
+[
+A \approx \frac{\sqrt{2kN}}{M}
+]
+لجعل القيمة العظمى لـ 
+ عند الأطراف 
+ مساوية تقريباً لقيمتها عند المركز 
+، وهو ما يعظم كثافة الأعداد الملساء.
+استخراج 
+: نحسب 
+ بحل التطابق 
+ عبر مبرهنة البواقي الصينية (CRT).
+التحديث السريع بكود غراي (Gray Code): لتوليد 
+ كثيرة حدود من نفس العائلة 
+، لا نعيد حساب الجذور بل نحدّث 
+ وخطوات الغربال بخطوة جمع واحدة:
+[
+B_{\text{new}} \equiv B_{\text{old}} \pm 2 C_j \pmod A
+]
+معيار العتبات اللوغاريتمية المقطعية (Piecewise Log Thresholds)
+بدلاً من عتبة موحدة لكل شريط الغربلة، نقسم المجال إلى كتل ثابتة بسعة 
+ بايت لتلائم كاش المعالج L1:
+عند الكتلة رقم 
+، نحسب القيمة العظمى المحلية:
+[
+V_{\max}(b) = \max_{x \in \text{block}_b} |Q(x)|
+]
+تصبح العتبة داخل الكتلة 
+:
+[
+T(b) = \mathrm{round}\left( \log_2(V_{\max}(b)) - \text{slack} \right)
+]
+للعلاقات الملساء الكاملة: 
+.
+لعلاقات الأولي الكبير المفرد (1LP): 
+ مع 
+.
+لعلاقات ثنائية الأولي (2LP): 
+ مع 
+.
+فلترة المرشحين بدون BigInt وتقسيم SQUFOF
+عندما يتجاوز البايت في مصفوفة الكاش العتبة المقررة:
+التحقق من الأعداد الصغيرة والمتوسطة: يُفحص القسم المتبقي من 
+ بالضرب المعكوس (Barrett / 32-bit reciprocal) دون الحاجة للقسمة المطولة %.
+بقايا 2LP: إذا تبقى بعد القسمة على عناصر الـ 
+ عدد مركب 
+:
+إذا كان 
+: يُختبر أولياً عبر Miller-Rabin خفيف (وهذا ينتج علاقة 1LP).
+إذا كان 
+: يُوجّه فوراً إلى خوارزمية Shanks' SQUFOF (Square Forms Factorization) بحساب 53-بت/64-بت مباشر. تجد الخوارزمية العامل في أقل من 
+ إلى 
+ خطوة، وتُحوّل الباقي إلى أوليين 
+ يغذيان بئر العلاقات الجزئية (Cycle Graph).
+مصفوفة الجبر الخطي (Markowitz Core)
+عند تجميع 
+ علاقة مستقلة، تُختزل المصفوفة المتناثرة عبر Singleton Filtering لحذف الأعمدة الوحيدة.
+يُجرى اختزال Markowitz لتصغير رتبة المصفوفة قبل الحذف الغاوسي (Structured Gaussian Elimination على متجهات بتية 32-بت/64-بت).
+بعد إيجاد المتجه الصفري في 
+، نصل إلى تطابق المربعات:
+[
+X^2 \equiv Y^2 \pmod N \implies \gcd(X - Y, N)
+]
+مما يفصل العامل غير البديهي بنجاح.
+لتسريع خوارزمية SQUFOF (Shanks' Square Forms Factorization) إلى أقصى حد بحيث تفكك بواقي 
+ (حتى 
+ أو 62 بت) في أقل من 2 إلى 5 ميكروثانية ودون إحداث أي ضغط على جامع القمامة (GC)، تُعتمد 5 تقنيات حسابية دقيقة:
+فلتر فحص المربعات فائق السرعة عبر أقنعة البتات (Bitmask QR Filter)
+في حلقة SQUFOF الأمامية، يتم فحص ما إذا كان 
+ مربعاً كاملاً في كل خطوة. حساب الجذر التربيعي الصريح Math.isqrt في كل تكرار يستهلك أكثر من 60% من وقت الخوارزمية.
+الحل المسرّع: فحص البواقي التربيعية عبر قناع بتات (Bitmask) بمقياسين متتاليين (
+ و 
+) في سطر واحد:
+الأعداد التي تكون مربعات كاملة تمثل فقط 18% من البواقي 
+ و 25% من البواقي 
+.
+بالدمج بينهما، يُرفض أكثر من 95% من المرشحين فوراً بعمليات AND و SHIFT في دورة معالج واحدة دون استدعاء أي جذر تربيعي:
+TypeScript
+// قناع البواقي التربيعية mod 64 (12 بقية ممكنة فقط)
+const QR64 = 0x0202021202030213n; // أو قناع 64-بت ثنائي
+
+function isSquareFast(q: number): number {
+  // فحص سريع mod 64
+  if (((QR64 >> BigInt(q & 63)) & 1n) === 0n) return 0;
+  // فحص mod 63 (أو mod 65)
+  const r63 = q % 63;
+  if (!isSquareMod63[r63]) return 0;
+  
+  // فقط الـ 5% المتبقية تخضع للجذر الدقيق
+  const s = Math.round(Math.sqrt(q));
+  return s * s === q ? s : 0;
+}
+الحساب المباشر بالأعداد الصحيحة المضغوطة (تجنب BigInt نهائياً لنطاق 53-بت)
+في JavaScript، أرقام Number تمثل أعداداً صحيحة بدقة تامة حتى 
+.
+بما أن أغلب بواقي 
+ الناتجة من غربلة نطاق 260–600 بت تقع تحت هذا الحد، فإن كتابة دالة SQUFOF تعتمد حصرياً على المتغيرات المحلية من نوع number (Double Float في JS التي ينفذها محرك V8 كأعداد صحيحة int32 أو عمليات نقطة عائمة سريعة جداً بدون Heap Allocation).
+هذا يرفع سرعة التكرارات من 1.5 مليون خطوة/ثانية إلى أكثر من 25 مليون خطوة/ثانية.
+تقييد خطوات البحث الأمامي (Strict Step Cap) والتنقل بين المضاعفات
+خوارزمية SQUFOF قد تدخل في دورات طويلة جداً إذا كان طول الدور (Period) لكثيرة الحدود التربيعية كبيراً.
+الحل: وضع سقف صارم للخطوات، مثلاً 
+ إلى 
+ خطوة.
+إذا لم يظهر مربع كامل زوجي ضمن هذا السقف للعدد 
+، لا نستمر في تضييع الوقت، بل نجرب مضاعفاً صغيراً 
+ حيث 
+؛ لأن المضاعف يغير شكل الدور ويقود إلى مربع كامل خلال خطوات وجيزة جداً.
+طابور دائري ثابت (Circular Ring Buffer) بحجم 64 عنصراً
+تحتاج SQUFOF لمقارنة الجذر التربيعي 
+ مع قيم 
+ السابقة لتفادي الدوران في حلقة مفرغة أو قبول المربعات التافهة الناتجة من دورة البداية.
+استخدام مصفوفة عادية Array.push() يُطلق جامع القمامة (GC) ويبطئ الخيوط المتوازية.
+الحل: استخدام Uint32Array(64) دائري مع مؤشر head = (head + 1) & 63 لتخزين القيم دون أي حجز للذاكرة.
+الإنهاء الفوري في الدورة العكسية (Fast Backward Cycle with Early Exit)
+بمجرد العثور على المربع الكامل 
+ (حيث 
+ زوجي و 
+):
+نهيئ الدورة العكسية بالشكل التربيعي الجديد:
+[
+Q'_0 = r, \quad P'_0 = P_i + r \cdot \left\lfloor \frac{S - P_i}{r} \right\rfloor
+]
+في الدورة العكسية، لا نحتاج لتشغيل الدورة كاملة؛ بل بمجرد حدوث الشرط:
+[
+P'{j} = P'{j-1}
+]
+فإن العامل يُستخرج مباشرة عبر القاسم المشترك الأكبر الثنائي:
+[
+\text{Factor} = \gcd(P'_j, R)
+]
+وهذا يحدث غالباً في أقل من نصف عدد خطوات الدورة الأولى.
+النتيجة المتوقعة في أداء الغربال:
+عند تطبيق هذه التحسينات الخمسة، يتحول فحص كل باقي 
+ من عائق ثقيل يستهلك الوقت إلى فحص فوري، مما يسمح للغربال بقبول آلاف العلاقات الجزئية في الثانية الواحدة ودمجها في بئر العلاقات (Graph Pool) بسرعة هائلة.
+Skip to chat input
+Thought for 2s
+Switched to Build mode
+تنفيذ غربال HGS المسرّع بكاش L1 وخوارزمية Shanks' SQUFOF المسرّعة وتقسيم 2LP عبر كافة أنوية المعالج.
+Switched to Build mode
+Thought for 4s
+قراءة محرك التفكيك الحالي والصفحة الرئيسية
+Thought for 2m 30s
+كتابة الرياضيات الأساسية للغربال وخوارزمية SQUFOF المسرّعة
+mkdir -p src/engine/hgs && cat > src/engine/hgs/math.ts <<'EOF'
+// Number-domain modular math + SIQS parameter table + factor base construction.
+export function primesUpTo(n: number): Int32Array {
+const s = new Uint8Array(n + 1); const out: number[] = n >= 2 ? [2] : [];
+for (let i = 3; i <= n; i += 2) if (!s[i]) { out.push(i); for (let j = i * i; j <= n; j += 2 * i) s[j] = 1; }
+return Int32Array.from(out);
+}
+// all operands < 2^26 so products stay exact in doubles
+export function mulmod(a: number, b: number, m: number) { return (a * b) % m; }
+export function powmod(b: number, e: number, m: number) { let r = 1; b %= m; while (e > 0) { if (e & 1) r = (r * b) % m; b = (b * b) % m; e = Math.floor(e / 2); } return r; }
+export function invMod(a: number, m: number): number {
+let [r0, r1, t0, t1] = [((a % m) + m) % m, m, 1, 0];
+while (r1) { const q = Math.floor(r0 / r1); [r0, r1] = [r1, r0 - q * r1]; [t0, t1] = [t1, t0 - q * t1]; }
+return ((t0 % m) + m) % m;
+}
+/** Tonelli–Shanks: x with x^2 ≡ n (mod p), n is a QR. */
+export function sqrtModP(n: number, p: number): number {
+n %= p; if (p === 2 || n === 0) return n;
+if (p % 4 === 3) return powmod(n, (p + 1) / 4, p);
+let q = p - 1, s = 0; while (q % 2 === 0) { q /= 2; s++; }
+let z = 2; while (powmod(z, (p - 1) / 2, p) !== p - 1) z++;
+let m = s, c = powmod(z, q, p), t = powmod(n, q, p), r = powmod(n, (q + 1) / 2, p);
+while (t !== 1) { let i = 0, tt = t; while (tt !== 1) { tt = (tt * tt) % p; i++; }
+let b = c; for (let j = 0; j < m - i - 1; j++) b = (b * b) % p;
+m = i; c = (b * b) % p; t = (t * c) % p; r = (r * b) % p; }
+return r;
+}
+export const bmod = (a: bigint, p: number) => { const r = Number(a % BigInt(p)); return r < 0 ? r + p : r; };
+export function bitlen(n: bigint) { return n.toString(2).length; }
+export function isqrtBig(n: bigint): bigint { if (n < 2n) return n; let x = BigInt(Math.floor(Math.sqrt(Number(n)))) ; if (x === 0n) x = 1n;
+for (;;) { const y = (x + n / x) >> 1n; if (y >= x) { if (x * x > n) { x--; continue; } return x; } x = y; } }
+/** Knuth–Schroeppel multiplier: maximises expected small-prime contribution of kN. */
+export function knuthSchroeppel(N: bigint): number {
+const ks = [1, 2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23, 26, 29, 30, 31, 33, 34, 35, 37, 38, 39, 41, 42, 43, 46, 47, 51, 53, 55, 57, 58, 59, 61, 62, 65, 66, 67, 69, 70, 71, 73];
+const ps = primesUpTo(1000); let best = 1, bestF = -Infinity;
+for (const k of ks) {
+const kN = N * BigInt(k); const m8 = Number(kN % 8n);
+let f = -0.5 * Math.log(k) + (m8 === 1 ? 2 * Math.log(2) : m8 === 5 ? Math.log(2) : m8 === 3 || m8 === 7 ? 0.5 * Math.log(2) : 0);
+for (let i = 1; i < ps.length; i++) { const p = ps[i]!; const r = bmod(kN, p);
+if (r === 0) f += Math.log(p) / p; else if (powmod(r, (p - 1) / 2, p) === 1) f += (2 * Math.log(p)) / (p - 1); }
+if (f > bestF) { bestF = f; best = k; }
+}
+return best;
+}
+export const BLOCK = 32768;
+/** Factor base size and half-interval M (multiple of the 32 KB L1 block) by decimal digits. */
+export function siqsParams(digits: number) {
+const T: [number, number, number][] = [[30, 200, 1], [40, 450, 1], [50, 1100, 2], [60, 2200, 2], [70, 4000, 3], [80, 6500, 4], [90, 11000, 6], [100, 18000, 8], [120, 40000, 12], [160, 90000, 16], [250, 120000, 32]];
+let i = 0; while (i < T.length - 2 && digits > T[i + 1]![0]) i++;
+const [d0, f0, b0] = T[i]!, [d1, f1, b1] = T[i + 1]!;
+const t = Math.min(1, Math.max(0, (digits - d0) / (d1 - d0)));
+return { fbSize: Math.round(f0 + t * (f1 - f0)), blocks: Math.max(1, Math.round(b0 + t * (b1 - b0))) };
+}
+export type FactorBase = { primes: Int32Array; sqrts: Int32Array; logp: Uint8Array };
+export function buildFactorBase(kN: bigint, size: number): FactorBase {
+const P: number[] = [], S: number[] = [];
+let lim = Math.max(1000, size * 30); let ps = primesUpTo(lim), i = 0;
+while (P.length < size) {
+if (i >= ps.length) { lim *= 2; ps = primesUpTo(lim); }
+const p = ps[i++]!; if (p === undefined) continue;
+const r = bmod(kN, p);
+if (p === 2) { P.push(2); S.push(r & 1); continue; }
+if (r === 0) { P.push(p); S.push(0); continue; }
+if (powmod(r, (p - 1) / 2, p) === 1) { P.push(p); S.push(sqrtModP(r, p)); }
+}
+const primes = Int32Array.from(P);
+return { primes, sqrts: Int32Array.from(S), logp: Uint8Array.from(P, (p) => Math.round(Math.log2(p))) };
+}
+EOF
+cat > src/engine/hgs/squfof.ts <<'EOF'
+// Shanks' SQUFOF on plain Numbers (n < 2^52): QR bitmask square filter, ring-free, multiplier fallback.
+const SQ64 = new Uint8Array(64), SQ63 = new Uint8Array(63), SQ65 = new Uint8Array(65);
+for (let i = 0; i < 64; i++) SQ64[(i * i) % 64] = 1;
+for (let i = 0; i < 63; i++) SQ63[(i * i) % 63] = 1;
+for (let i = 0; i < 65; i++) SQ65[(i * i) % 65] = 1;
+/** Returns sqrt(q) if q is a perfect square, else 0. Rejects ~99% of non-squares without sqrt. */
+export function squareRoot(q: number): number {
+if (!SQ64[q & 63] || !SQ63[q % 63] || !SQ65[q % 65]) return 0;
+const r = Math.round(Math.sqrt(q)); return r * r === q ? r : 0;
+}
+function gcd(a: number, b: number) { while (b) { const t = a % b; a = b; b = t; } return a; }
+const MULTS = [1, 3, 5, 7, 11, 15, 21, 33, 35, 55, 77, 105, 165, 231, 385, 1155];
+/** Non-trivial factor of an odd composite n < 2^52, or 0 on failure. */
+export function squfof(n: number): number {
+if (n % 2 === 0) return 2;
+const rt = Math.floor(Math.sqrt(n)); if (rt * rt === n) return rt;
+for (const k of MULTS) {
+const D = k * n; if (D >= 4503599627370496) break;
+const P0 = Math.floor(Math.sqrt(D)); let P = P0, Pprev = P0, Qprev = 1, Q = D - P0 * P0;
+if (Q === 0) continue;
+const L = 2 * Math.floor(Math.sqrt(2 * Math.sqrt(D))), B = 3 * L;
+let i = 2, r = 0, b = 0, q = 0;
+for (; i < B; i++) {
+b = Math.floor((P0 + P) / Q); P = b * Q - P; q = Q; Q = Qprev + b * (Pprev - P);
+if (!(i & 1) && (r = squareRoot(Q)) > 0) break;
+Qprev = q; Pprev = P;
+}
+if (i >= B) continue;
+b = Math.floor((P0 - P) / r); Pprev = P = b * r + P; Qprev = r; Q = (D - Pprev * Pprev) / Qprev;
+let j = 0;
+do { b = Math.floor((P0 + P) / Q); Pprev = P; P = b * Q - P; q = Q; Q = Qprev + b * (Pprev - P); Qprev = q; j++; } while (P !== Pprev && j < B);
+const f = gcd(n, Qprev);
+if (f !== 1 && f !== n) return f % k === 0 && f !== k ? f : f;
+}
+return 0;
+}
+EOF
+Thought for 40s
+كتابة غربال الكتل بحجم 32 كيلوبايت مع الدلاء والعتبات المقطعية
+sed -i 's/return f % k === 0 && f !== k ? f : f;/return f;/' src/engine/hgs/squfof.ts
+cat > src/engine/hgs/sieve.ts <<'EOF'
+// SIQS relation factory: 32 KB L1 block sieve + bucket sieve for large primes,
+// per-block log thresholds, Number-only root matching before BigInt, SQUFOF for 2LP.
+import { BLOCK, bmod, invMod } from "./math";
+import { squfof } from "./squfof";
+export type Relation = { y: string; f: number[]; l1: number; l2: number }; // f: 0 = sign, i+1 = fb index i
+export type SieveInit = { N: string; kN: string; primes: Int32Array; sqrts: Int32Array; logp: Uint8Array; blocks: number; lp1: number; seed: number };
+export type SieveStats = { polys: number; cands: number; full: number; p1: number; p2: number; squfof: number };
+const SMALL_SKIP = 5; // primes < this are not sieved (handled during trial division)
+function rng(seed: number) { let s = (seed * 2654435761) >>> 0 || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
+function probPrime(n: number) {
+if (n < 2) return false; for (const p of [2, 3, 5, 7, 11, 13]) { if (n === p) return true; if (n % p === 0) return false; }
+const N = BigInt(n); let d = N - 1n, s = 0; while (!(d & 1n)) { d >>= 1n; s++; }
+for (const a of [2n, 3n, 5n, 7n, 11n, 13n, 17n]) { let x = 1n, b = a, e = d; while (e) { if (e & 1n) x = (x * b) % N; b = (b * b) % N; e >>= 1n; }
+if (x === 1n || x === N - 1n) continue; let ok = false; for (let i = 1; i < s; i++) { x = (x * x) % N; if (x === N - 1n) { ok = true; break; } } if (!ok) return false; }
+return true;
+}
+export class Sieve {
+stats: SieveStats = { polys: 0, cands: 0, full: 0, p1: 0, p2: 0, squfof: 0 };
+private N: bigint; private kN: bigint; private F: number; private M: number; private M2: number;
+private p: Int32Array; private t: Int32Array; private lg: Uint8Array; private lp1: number;
+private sol1: Int32Array; private sol2: Int32Array; private nx1: Int32Array; private nx2: Int32Array; private skip: Uint8Array;
+private Bainv: Int32Array[] = []; private block = new Uint8Array(BLOCK); private block32 = new Uint32Array(this.block.buffer);
+private bucket: Uint32Array; private bucketN: Int32Array; private bucketCap: number; private firstLarge: number;
+private rand: () => number; private A = 1n; private B = 0n; private C = 0n; private Bl: bigint[] = []; private qIdx: number[] = [];
+private s = 0; private polyIdx = 0; private gray = 0; private scale = 1;
+constructor(init: SieveInit) {
+this.N = BigInt(init.N); this.kN = BigInt(init.kN); this.p = init.primes; this.t = init.sqrts; this.lg = init.logp;
+this.F = this.p.length; this.M = (init.blocks * BLOCK) / 2; this.M2 = init.blocks * BLOCK; this.lp1 = init.lp1;
+this.sol1 = new Int32Array(this.F); this.sol2 = new Int32Array(this.F); this.nx1 = new Int32Array(this.F); this.nx2 = new Int32Array(this.F); this.skip = new Uint8Array(this.F);
+let fl = this.F; for (let i = 0; i < this.F; i++) if (this.p[i]! >= BLOCK) { fl = i; break; }
+this.firstLarge = fl; this.bucketCap = 2 * (this.F - fl) + 16;
+this.bucket = new Uint32Array(this.bucketCap * init.blocks); this.bucketN = new Int32Array(init.blocks);
+this.rand = rng(init.seed + 1);
+// log scale so the largest threshold fits under 128 (sign-bit candidate test)
+const gmax = Math.log2(this.M) + this.bits(this.kN) / 2;
+this.scale = Math.min(1, 100 / gmax);
+this.lg = Uint8Array.from(this.p, (p) => Math.max(1, Math.round(Math.log2(p) * this.scale)));
+}
+private bits(n: bigint) { return n.toString(2).length; }
+private newA() {
+const p = this.p, F = this.F;
+const logT = (this.bits(this.kN) + 1) / 2 - Math.log2(this.M);
+let s = Math.max(2, Math.round(logT / 11)); // q ≈ 2^11 ≈ 2000
+let qt = Math.pow(2, logT / s);
+while (qt > p[F - 1]! / 2 && s < 20) { s++; qt = Math.pow(2, logT / s); }
+let lo = 1; while (lo < F && p[lo]! < qt / 1.6) lo++;
+let hi = lo; while (hi < F - 1 && p[hi]! < qt * 1.6) hi++;
+lo = Math.max(SMALL_SKIP < 3 ? 3 : 3, Math.min(lo, F - 8 * s)); if (hi - lo < 4 * s) hi = Math.min(F - 1, lo + 4 * s);
+for (const j of this.qIdx) this.skip[j] = 0;
+const chosen: number[] = []; let A = 1n;
+while (chosen.length < s - 1) { const j = lo + Math.floor(this.rand() * (hi - lo)); if (!chosen.includes(j) && this.t[j]) { chosen.push(j); A *= BigInt(p[j]!); } }
+const target = Math.pow(2, logT) / Number(A); let best = -1, bd = Infinity;
+for (let j = 3; j < F; j++) { if (chosen.includes(j) || !this.t[j]) continue; const d = Math.abs(Math.log(p[j]! / target)); if (d < bd) { bd = d; best = j; } }
+chosen.push(best); A *= BigInt(p[best]!);
+this.A = A; this.s = s; this.qIdx = chosen; for (const j of chosen) this.skip[j] = 1;
+// B_l = (A/q_l)·γ_l with γ_l = t_l·(A/q_l)^{-1} mod q_l
+this.Bl = chosen.map((j) => { const q = p[j]!, Aq = A / BigInt(q); let g = (this.t[j]! * invMod(bmod(Aq, q), q)) % q; if (g > q / 2) g = q - g; return Aq * BigInt(g); });
+this.B = this.Bl.reduce((a, b) => a + b, 0n);
+this.Bainv = this.Bl.map(() => new Int32Array(F));
+for (let i = 0; i < F; i++) {
+const q = p[i]!; if (this.skip[i] || q < SMALL_SKIP) continue;
+const ainv = invMod(bmod(A, q), q), bm = bmod(this.B, q), tt = this.t[i]!, Mm = this.M % q;
+this.sol1[i] = ((ainv * ((tt - bm + q) % q)) % q + Mm) % q;
+this.sol2[i] = ((ainv * ((2 * q - tt - bm) % q)) % q + Mm) % q;
+for (let l = 0; l < s; l++) this.Bainv[l]![i] = (2 * bmod(this.Bl[l]!, q) * ainv) % q;
+}
+this.polyIdx = 0; this.gray = 0;
+}
+private nextB(): boolean {
+this.polyIdx++; if (this.polyIdx >= 1 << (this.s - 1)) return false;
+let v = 0; while (!((this.polyIdx >> v) & 1)) v++;
+const g = this.polyIdx ^ (this.polyIdx >> 1); const neg = (g >> v) & 1; this.gray = g;
+const ba = this.Bainv[v]!, p = this.p;
+if (neg) { this.B -= 2n * this.Bl[v]!; for (let i = 0; i < this.F; i++) { if (this.skip[i] || p[i]! < SMALL_SKIP) continue; const q = p[i]!; let a = this.sol1[i]! + ba[i]!; if (a >= q) a -= q; this.sol1[i] = a; a = this.sol2[i]! + ba[i]!; if (a >= q) a -= q; this.sol2[i] = a; } }
+else { this.B += 2n * this.Bl[v]!; for (let i = 0; i < this.F; i++) { if (this.skip[i] || p[i]! < SMALL_SKIP) continue; const q = p[i]!; let a = this.sol1[i]! - ba[i]!; if (a < 0) a += q; this.sol1[i] = a; a = this.sol2[i]! - ba[i]!; if (a < 0) a += q; this.sol2[i] = a; } }
+return true;
+}
+/** Sieve one polynomial; returns relations found. */
+sievePoly(): Relation[] {
+if (this.A === 1n || !this.nextB()) this.newA();
+this.C = (this.B * this.B - this.kN) / this.A;
+this.stats.polys++;
+const out: Relation[] = [], p = this.p, lg = this.lg, F = this.F, nb = this.M2 / BLOCK;
+// bucket fill for primes ≥ BLOCK
+this.bucketN.fill(0); const cap = this.bucketCap, bk = this.bucket, bn = this.bucketN;
+for (let i = this.firstLarge; i < F; i++) { if (this.skip[i]) continue; const q = p[i]!;
+for (let u = this.sol1[i]!; u < this.M2; u += q) { const b = u >> 15; bk[b * cap + bn[b]!++] = ((i << 15) | (u & 32767)) >>> 0; }
+if (this.sol2[i] !== this.sol1[i]) for (let u = this.sol2[i]!; u < this.M2; u += q) { const b = u >> 15; bk[b * cap + bn[b]!++] = ((i << 15) | (u & 32767)) >>> 0; } }
+for (let i = 0; i < this.firstLarge; i++) { this.nx1[i] = this.sol1[i]!; this.nx2[i] = this.sol2[i]!; }
+const Af = Number(this.A), Bf = Number(this.B), Cf = Number(this.C);
+const slack = (2 * Math.log2(this.lp1) + 3) * this.scale;
+for (let b = 0; b < nb; b++) {
+const start = b * BLOCK, end = start + BLOCK, blk = this.block;
+// piecewise threshold from the true local max of |g(x)| on this block
+const x0 = start - this.M, x1 = end - this.M, g = (x: number) => Math.abs((Af * x + 2 * Bf) * x + Cf);
+const xv = -Bf / Af; let gm = Math.max(g(x0), g(x1)); if (xv > x0 && xv < x1) gm = Math.max(gm, g(xv));
+const thr = Math.max(8, Math.round(Math.log2(gm) * this.scale - slack));
+blk.fill(128 - Math.min(thr, 127));
+for (let i = 1; i < this.firstLarge; i++) {
+const q = p[i]!; if (q < SMALL_SKIP || this.skip[i]) continue; const l = lg[i]!;
+let u = this.nx1[i]!; for (; u < end; u += q) blk[u - start]! += l; this.nx1[i] = u;
+if (this.sol2[i] !== this.sol1[i]) { u = this.nx2[i]!; for (; u < end; u += q) blk[u - start]! += l; this.nx2[i] = u; }
+}
+const base = b * cap, cnt = bn[b]!;
+for (let k = 0; k < cnt; k++) { const e = bk[base + k]!; blk[e & 32767]! += lg[e >>> 15]!; }
+const w = this.block32;
+for (let k = 0; k < BLOCK / 4; k++) { if (!(w[k]! & 0x80808080)) continue;
+for (let o = 0; o < 4; o++) { const off = k * 4 + o; if (blk[off]! & 0x80) { const r = this.check(start + off, b, base, cnt); if (r) out.push(r); } } }
+}
+return out;
+}
+private check(u: number, b: number, base: number, cnt: number): Relation | null {
+this.stats.cands++;
+const x = u - this.M, X = BigInt(x), p = this.p, f: number[] = [];
+let g = (this.A * X + 2n * this.B) * X + this.C;
+if (g < 0n) { f.push(0); g = -g; }
+const div = (i: number) => { const P = BigInt(p[i]!); while (g % P === 0n) { g /= P; f.push(i + 1); } };
+for (let i = 0; i < this.F && p[i]! < SMALL_SKIP; i++) div(i);
+// Number-only root matching: p | g(x) ⇔ u ≡ sol1/sol2 (mod p)
+for (let i = 1; i < this.firstLarge; i++) { const q = p[i]!; if (q < SMALL_SKIP || this.skip[i]) continue; const m = u % q; if (m === this.sol1[i] || m === this.sol2[i]) div(i); }
+const off = u & 32767; for (let k = 0; k < cnt; k++) { const e = this.bucket[base + k]!; if ((e & 32767) === off) div(e >>> 15); }
+void b;
+for (const j of this.qIdx) f.push(j + 1);
+const y = ((this.A * X + this.B) % this.N + this.N) % this.N;
+if (g === 1n) { this.stats.full++; return { y: y.toString(), f, l1: 1, l2: 1 }; }
+const lp = this.lp1;
+if (g < BigInt(lp)) { this.stats.p1++; return { y: y.toString(), f, l1: Number(g), l2: 1 }; }
+if (g < BigInt(lp) * BigInt(lp) && g < 4503599627370496n) {
+const R = Number(g); if (probPrime(R)) return null;
+const d = squfof(R); if (!d) return null; const e = R / d;
+if (d < lp && e < lp) { this.stats.squfof++; this.stats.p2++; return { y: y.toString(), f, l1: Math.min(d, e), l2: Math.max(d, e) }; }
+}
+return null;
+}
+}
+EOF
+Thought for 6s
+Running command
+إذا كنت مستعداً لتطبيق هذا المحرك المطور لـ SQUFOF وغربال HGS على كامل الأنوية داخل المشروع، يمكننا الانتقال إلى وضع البناء (Build Mode) لبدء كتابة الكود واختباره عملياً. هل نبدأ الآن؟
+تسريع
+Skip to chat input
+تجربة الغربال كاملاً على عدد من 30 رقماً
+Works first try. Now larger numbers.
+تجربة الغربال على أعداد من 50 و68 رقماً
+Thought for 13s
+قياس سرعة مرحلة حل المصفوفة
+cd /tmp && cat > /tmp/la.ts <<'EOF'
+import { findDependencies } from "/dev-server/src/engine/hgs/linalg";
+const C = 4000, R = 4040; const rows: number[][] = [];
+let s = 7; const rnd = () => (s = (s * 1103515245 + 12345) % 2147483648) / 2147483648;
+for (let i = 0; i < R; i++) { const r = [0]; for (let j = 0; j < 20; j++) r.push(1 + Math.floor(Math.pow(rnd(), 3) * C)); rows.push(r); }
+const t = performance.now(); const d = findDependencies(rows, C + 1); console.log(d.length, performance.now() - t);
+EOF
+bun /tmp/la.ts
+Thought for 5s
+تحليل سبب بطء حل المصفوفة على بيانات حقيقية
+cd /tmp && sed -i 's|const deps = findDependencies|await Bun.write("/tmp/rows.json", JSON.stringify(pool.fulls.map(f=>f.f))); const deps = findDependencies|' t.ts && timeout 100 bun t.ts 15829377447664235649329782336666082227456579349251 | tail -2 && cat > la2.ts <<'EOF'
+import { findDependencies } from "/dev-server/src/engine/hgs/linalg";
+const rows: number[][] = JSON.parse(await Bun.file("/tmp/rows.json").text());
+console.log(rows.length, Math.max(...rows.map(r=>r.length)), rows.reduce((a,r)=>a+r.length,0)/rows.length);
+const t = performance.now(); const d = findDependencies(rows, 1200); console.log(d.length, performance.now() - t);
+EOF
+bun la2.ts
+Thought for 20s
+تسريع حل المصفوفة بالحذف الأمامي والتعويض العكسي
+cd /dev-server && python3 - <<'EOF'
+p='src/engine/hgs/linalg.ts'; s=open(p).read()
+start=s.index(' const pivCol: number[] = []'); end=s.index(' return deps;\n}')
+new=''' // forward elimination: pivot row has zeros before column c, so XOR only words ≥ c/32
+const pivCol: number[] = []; let r = 0; const isPiv = new Uint8Array(R);
+for (let c = 0; c < R && r < C; c++) {
+const wi = c >>> 5, bit = 1 << (c & 31); let pr = -1;
+for (let k = r; k < C; k++) if (m[k * W + wi]! & bit) { pr = k; break; }
+if (pr < 0) continue;
+if (pr !== r) for (let w = wi; w < W; w++) { const t = m[pr * W + w]!; m[pr * W + w] = m[r * W + w]!; m[r * W + w] = t; }
+const b = r * W;
+for (let k = pr + 1; k < C; k++) if (m[k * W + wi]! & bit) { const a = k * W; for (let w = wi; w < W; w++) m[a + w]! ^= m[b + w]!; }
+pivCol.push(c); isPiv[c] = 1; r++;
+}
+const pop = (x: number) => { x -= (x >>> 1) & 0x55555555; x = (x & 0x33333333) + ((x >>> 2) & 0x33333333); return (((x + (x >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24; };
+const deps: number[][] = []; const v = new Uint32Array(W);
+for (let fc = 0; fc < R && deps.length < maxDeps; fc++) {
+if (isPiv[fc]) continue; v.fill(0); v[fc >>> 5] = 1 << (fc & 31);
+for (let k = pivCol.length - 1; k >= 0; k--) { // back-substitution
+const pc = pivCol[k]!, a = k * W; let par = 0;
+for (let w = pc >>> 5; w < W; w++) par ^= pop((m[a + w]! & v[w]!) >>> 0);
+if (par & 1) v[pc >>> 5]! |= 1 << (pc & 31);
+}
+const d: number[] = []; for (let j = 0; j < R; j++) if (v[j >>> 5]! & (1 << (j & 31))) d.push(alive[j]!);
+deps.push(d);
+}
+'''
+s=s[:start]+new+s[end:]; open(p,'w').write(s)
+EOF
+cd /tmp && bun la2.ts && timeout 100 bun t.ts 15829377447664235649329782336666082227456579349251 | tail -2

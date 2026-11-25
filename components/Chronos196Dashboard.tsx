@@ -113,10 +113,17 @@ export const CHRONOS_BENCHMARKS = [
 
 export interface WorkerThreadStat {
   id: number;
-  role?: 'ecm' | 'siqs';
+  role?: 'ecm' | 'siqs' | 'hgs' | 'cfrac';
+  engineKind?: string;
   curves: number;
   polys?: number;
   relations?: number;
+  polysPerSec?: number;
+  candsTested?: number;
+  squfofSplits?: number;
+  lastBatchMs?: number;
+  paused?: boolean;
+  pauseReason?: 'gf2' | 'manual' | null;
   stage: string;
   active: boolean;
 }
@@ -257,7 +264,9 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
   const displayOps =
     unifiedRace && unifiedRace.totalOperations > 0
       ? unifiedRace.totalOperations
-      : steps;
+      : steps > 0
+      ? steps
+      : 0;
 
   const displayWinningEngine =
     unifiedRace?.winningEngine || solution?.method || null;
@@ -436,7 +445,7 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
 
           <div className="bg-[#FBF9F5] p-3.5 rounded-lg border border-[#E2DDD2] space-y-1">
             <span className="text-[11px] font-mono text-[#57534E] block">
-              {isRTL ? 'إجمالي العمليات الحسابية' : 'Opérations totales'}
+              {isRTL ? 'العمليات والمسح (Ops + Sieve Positions)' : 'Opérations & Positions criblées'}
             </span>
             <span dir="ltr" className="text-lg font-bold font-mono-tabular text-[#1E3A8A] block">
               {displayOps > 0 ? displayOps.toLocaleString() : '—'}
@@ -454,7 +463,7 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
             }`}>
               {isRunning
                 ? (sharedGf2
-                    ? `GF(2): ${sharedGf2.siqsRelations} SIQS + ${sharedGf2.cfracRelations} CFRAC / ${sharedGf2.targetRelations}`
+                    ? `GF(2): ${sharedGf2.siqsRelations} SIQS + ${sharedGf2.hgsRelations ?? 0} HGS + ${sharedGf2.cfracRelations} CFRAC / ${sharedGf2.targetRelations}`
                     : (isRTL ? 'سباق متوازٍ قيد التنفيذ…' : 'Course en cours…'))
                 : (displayWinningEngine || (isRTL ? 'جاهز للتشغيل الموحد' : 'Prêt'))}
             </span>
@@ -535,15 +544,15 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
           </div>
         )}
 
-        {/* Live Shared GF(2) Matrix Progress Bar (SIQS + CFRAC) */}
+        {/* Live Shared GF(2) Matrix Progress Bar (SIQS + HGS + CFRAC · markowitz-core) */}
         {(isRunning || (sharedGf2 && sharedGf2.totalFullRelations > 0)) && sharedGf2 && (
           <div className="bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg p-3 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono-tabular">
               <span className="font-bold text-[#1C1917]">
-                {isRTL ? 'مصفوفة GF(2) المشتركة (SIQS + CFRAC → Block Wiedemann)' : 'Matrice GF(2) Unifiée (SIQS + CFRAC)'}
+                {isRTL ? 'مصفوفة GF(2) الموحدة (SIQS + HGS + CFRAC · markowitz-core)' : 'Matrice GF(2) Unifiée (SIQS + HGS + CFRAC · markowitz-core)'}
               </span>
               <span className="text-[#1E3A8A]" dir="ltr">
-                SIQS: {sharedGf2.siqsRelations} · CFRAC: {sharedGf2.cfracRelations} · Total: {sharedGf2.totalFullRelations}/{sharedGf2.targetRelations} · 1LP: {sharedGf2.lpCollisions}
+                SIQS: {sharedGf2.siqsRelations} · HGS: {sharedGf2.hgsRelations ?? 0} · CFRAC: {sharedGf2.cfracRelations} · Total: {sharedGf2.totalFullRelations}/{sharedGf2.targetRelations} · 1LP: {sharedGf2.lpCollisions}
               </span>
             </div>
             <div className="h-1.5 bg-[#E2DDD2] rounded-sm overflow-hidden">
@@ -571,7 +580,7 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
                 )}
               </div>
               <div className="text-xs font-mono-tabular text-[#14532D] font-bold" dir="ltr">
-                {displayElapsedMs} ms · {displayOps.toLocaleString()} ops
+                {displayElapsedMs > 0 ? `${displayElapsedMs} ms` : '—'} · {displayOps > 0 ? `${displayOps.toLocaleString()} ops` : 'Verified'}
               </div>
             </div>
 
@@ -1047,15 +1056,22 @@ export const Chronos196Dashboard: React.FC<Chronos196DashboardProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2" dir="ltr">
             {Array.from({ length: effectiveWorkerCount }).map((_, idx) => {
               const stat = workerThreadsStats?.find(s => s.id === idx);
-              const ecmWorkersCount = bitLength > 220
+              const ecmWorkersCount = bitLength > 272
                 ? effectiveWorkerCount
                 : (effectiveWorkerCount === 1 ? 0 : Math.max(1, Math.round(effectiveWorkerCount * 0.1)));
               const assignedRole = stat?.role || (idx < ecmWorkersCount ? 'ecm' : 'siqs');
+              const roleClass = assignedRole === 'ecm'
+                ? 'text-[#14532D] font-bold'
+                : assignedRole === 'hgs'
+                ? 'text-[#0F766E] font-bold'
+                : assignedRole === 'cfrac'
+                ? 'text-[#9A3412] font-bold'
+                : 'text-[#1E3A8A] font-bold';
               return (
                 <div key={idx} className="bg-[#FBF9F5] p-2.5 rounded-lg border border-[#E2DDD2] space-y-1 font-mono-tabular">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-bold text-[#1C1917]">W#{idx + 1}</span>
-                    <span className={assignedRole === 'ecm' ? 'text-[#14532D] font-bold' : 'text-[#1E3A8A] font-bold'}>
+                    <span className={roleClass}>
                       {assignedRole.toUpperCase()}
                     </span>
                   </div>

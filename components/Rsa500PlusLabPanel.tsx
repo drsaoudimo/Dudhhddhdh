@@ -17,6 +17,10 @@ import {
   runBonehDurfeeAttack,
   runWienerAttack
 } from '../lib/rsa500PlusAttacks';
+import {
+  recoverPrivateKeyFromAnyMethod,
+  solveModulusByAnyMethodAsync
+} from '../lib/anyMethodSolver';
 import { analyzeSnfsAndCadoParams } from '../snfsDetector';
 
 interface Rsa500PlusLabPanelProps {
@@ -60,6 +64,9 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
   const [wienerRes, setWienerRes] = useState<WienerAttackResult | null>(null);
   const [bdRes, setBdRes] = useState<BonehDurfeeResult | null>(null);
   const [expRunning, setExpRunning] = useState(false);
+  const [resolvingAutoE, setResolvingAutoE] = useState(false);
+  const [solveStatusMsg, setSolveStatusMsg] = useState<string | null>(null);
+  const abortCtrlRef = React.useRef<AbortController | null>(null);
   const [expError, setExpError] = useState<string | null>(null);
 
   // 2. Batch GCD state
@@ -92,42 +99,120 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
     }
     return () => {
       if (autoTimerRef.current) window.clearTimeout(autoTimerRef.current);
+      abortCtrlRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const computeAutoEForInputs = (
+  const stopAnyMethodSearch = () => {
+    abortCtrlRef.current?.abort();
+    abortCtrlRef.current = null;
+    setResolvingAutoE(false);
+    setExpRunning(false);
+    setSolveStatusMsg('تم إيقاف البحث المتوازي.');
+  };
+
+  const computeAutoEForInputs = async (
     rawN: string,
     mode: 'wiener' | 'boneh-durfee' | 'standard' = expMode,
     rawHintP: string = hintPFactorInput
-  ): AutoExponentResult | null => {
+  ): Promise<AutoExponentResult | null> => {
+    let N: bigint;
     try {
-      const N = parseBig(rawN);
-      if (N < 15n) return null;
-      let hintP: bigint | undefined;
-      let hintQ: bigint | undefined;
-      if (rawHintP.trim()) {
-        try {
-          const parsedP = parseBig(rawHintP);
-          if (parsedP > 1n && parsedP < N && N % parsedP === 0n) {
-            hintP = parsedP;
-            hintQ = N / parsedP;
-          }
-        } catch {}
-      } else if (currentN && rawN.replace(/[^0-9]/g, '') === currentN.replace(/[^0-9]/g, '') && currentP && currentQ) {
-        try {
-          hintP = BigInt(currentP);
-          hintQ = BigInt(currentQ);
-        } catch {}
-      }
-      const res = autoComputePublicExponentForN(N, mode, bdDelta, hintP, hintQ);
-      setRsaEInput(res.e);
-      setGeneratedDBits(res.dBits);
-      setAutoExpNotice(res);
-      setExpError(null);
-      return res;
+      N = parseBig(rawN);
     } catch {
       return null;
+    }
+    if (N < 15n) return null;
+
+    let hintP: bigint | undefined;
+    let hintQ: bigint | undefined;
+    if (rawHintP.trim()) {
+      try {
+        const parsedP = parseBig(rawHintP);
+        if (parsedP > 1n && parsedP < N && N % parsedP === 0n) {
+          hintP = parsedP;
+          hintQ = N / parsedP;
+        }
+      } catch {}
+    } else if (
+      currentN &&
+      rawN.replace(/[^0-9]/g, '') === currentN.replace(/[^0-9]/g, '') &&
+      currentP &&
+      currentP !== '???' &&
+      currentQ &&
+      currentQ !== '???'
+    ) {
+      try {
+        hintP = BigInt(currentP);
+        hintQ = BigInt(currentQ);
+      } catch {}
+    }
+
+    const syncRes = autoComputePublicExponentForN(N, mode, bdDelta, hintP, hintQ);
+    if (syncRes.phiComputed && syncRes.e) {
+      setRsaEInput(syncRes.e);
+      setGeneratedDBits(syncRes.dBits);
+      setAutoExpNotice(syncRes);
+      setExpError(null);
+      setSolveStatusMsg(null);
+      return syncRes;
+    }
+
+    // Never fall back to hardcoded 65537: resolve N / λ(N) FIRST by any method!
+    abortCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    abortCtrlRef.current = ctrl;
+    setResolvingAutoE(true);
+    setAutoExpNotice(null);
+    setRsaEInput('');
+    setExpError(null);
+    setSolveStatusMsg(`جارٍ البحث عن عوامل المودول (${N.toString(2).length} بت) وحساب λ(N) أولاً بأي طريقة ممكنة...`);
+
+    try {
+      const solveRes = await solveModulusByAnyMethodAsync(N, {
+        signal: ctrl.signal,
+        timeoutMs: 60000,
+        hints: { partialPrimeP0: hintP ? hintP.toString() : undefined },
+        onProgress: info => {
+          setSolveStatusMsg(`⏳ ${info.stage} (${(info.elapsedMs / 1000).toFixed(1)}ث)`);
+        }
+      });
+      if (ctrl.signal.aborted) return null;
+
+      if (solveRes.success && solveRes.factorP) {
+        const pFound = BigInt(solveRes.factorP);
+        const qFound =
+          solveRes.factorQ && solveRes.factorQ !== '1' ? BigInt(solveRes.factorQ) : N / pFound;
+        if (qFound > 1n && onFactorsRecovered) {
+          onFactorsRecovered(N.toString(), pFound.toString(), qFound.toString(), solveRes.winningMethod, solveRes.elapsedMs);
+        }
+        const resolved = autoComputePublicExponentForN(
+          N,
+          mode,
+          bdDelta,
+          pFound,
+          qFound > 1n ? qFound : undefined
+        );
+        if (resolved.e) {
+          setRsaEInput(resolved.e);
+        }
+        setGeneratedDBits(resolved.dBits);
+        setAutoExpNotice({
+          ...resolved,
+          notesAr: `✓ تم حسم التفكيك أولاً عبر (${solveRes.winningMethod}) وحساب λ(N) بدقة: ${resolved.notesAr}`
+        });
+        setSolveStatusMsg(null);
+        return resolved;
+      }
+
+      setSolveStatusMsg(solveRes.notesAr);
+      setExpError(solveRes.notesAr);
+      return null;
+    } finally {
+      if (abortCtrlRef.current === ctrl) {
+        setResolvingAutoE(false);
+      }
     }
   };
 
@@ -136,16 +221,20 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
     setWienerRes(null);
     setBdRes(null);
     setExpError(null);
+    setSolveStatusMsg(null);
     if (autoTimerRef.current) window.clearTimeout(autoTimerRef.current);
     const cleaned = nextN.trim().replace(/\s+/g, '');
     if (!autoComputeE || !cleaned || cleaned === lastGeneratedNRef.current) return;
     autoTimerRef.current = window.setTimeout(() => {
-      computeAutoEForInputs(nextN, expMode, hintPFactorInput);
-    }, 240);
+      void computeAutoEForInputs(nextN, expMode, hintPFactorInput);
+    }, 260);
   };
 
   const handleGenExpKey = (bits = expBits, mode = expMode) => {
+    abortCtrlRef.current?.abort();
+    setResolvingAutoE(false);
     setExpError(null);
+    setSolveStatusMsg(null);
     setWienerRes(null);
     setBdRes(null);
     setAutoExpNotice(null);
@@ -159,40 +248,143 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
     setGeneratedDBits(k.dBits);
   };
 
-  const handleRunExpAttack = () => {
+  const handleRunExpAttack = async () => {
+    abortCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    abortCtrlRef.current = ctrl;
     setExpError(null);
+    setSolveStatusMsg(null);
     setExpRunning(true);
-    setTimeout(() => {
-      try {
-        const N = parseBig(rsaNInput);
-        let eStr = rsaEInput.trim();
-        if (!eStr && autoComputeE) {
-          const computed = computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput);
-          if (computed) eStr = computed.e;
-        }
-        const e = parseBig(eStr);
-        if (N < 15n || e < 3n) throw new Error('يرجى إدخال قيم صالحة للمودول N والأس العام e.');
-        if (expMode === 'wiener') {
-          const r = runWienerAttack(N, e);
+
+    try {
+      const N = parseBig(rsaNInput);
+      let eStr = rsaEInput.trim();
+      if (!eStr && autoComputeE) {
+        const computed = await computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput);
+        if (computed?.e) eStr = computed.e;
+      }
+      if (!eStr) {
+        throw new Error('لم يُحدد الأس العام e بعد؛ جارٍ أو تعذر إيجاد العوامل وλ(N) أولاً.');
+      }
+      const e = parseBig(eStr);
+      if (N < 15n || e < 3n) throw new Error('يرجى إدخال قيم صالحة للمودول N والأس العام e.');
+
+      if (expMode === 'wiener') {
+        const r = runWienerAttack(N, e);
+        if (r.success && r.verifiedProduct && r.factorP && r.factorQ) {
           setWienerRes(r);
           setBdRes(null);
-          if (r.success && r.factorP && r.factorQ && onFactorsRecovered) {
+          if (onFactorsRecovered) {
             onFactorsRecovered(N.toString(), r.factorP, r.factorQ, `Wiener CF (${r.nBits}-bit)`, Math.round(r.durationMs));
           }
-        } else {
-          const r = runBonehDurfeeAttack(N, e, bdDelta, 3, 1);
+          return;
+        }
+      } else {
+        const r = runBonehDurfeeAttack(N, e, bdDelta, 3, 1);
+        if (r.success && r.verifiedProduct && r.factorP && r.factorQ) {
           setBdRes(r);
           setWienerRes(null);
-          if (r.success && r.factorP && r.factorQ && onFactorsRecovered) {
+          if (onFactorsRecovered) {
             onFactorsRecovered(N.toString(), r.factorP, r.factorQ, `Boneh–Durfee LLL (${r.nBits}-bit)`, Math.round(r.durationMs));
           }
+          return;
         }
-      } catch (err: any) {
-        setExpError(err?.message || 'خطأ في معطيات الإدخال.');
-      } finally {
+      }
+
+      // Direct Wiener/BD small-d bound did NOT apply (e.g. e = 65537):
+      // Automatically escalate to find factorization & λ(N) FIRST by ANY method, then recover d = e⁻¹ mod λ(N)!
+      setSolveStatusMsg(
+        `لم ينطبق حد فينر/LLL المباشر على e=${e.toString().slice(0, 12)} — تصعيد تلقائي لإيجاد العوامل وλ(N) بأي طريقة ممكنة واستخراج d...`
+      );
+
+      const rec = await recoverPrivateKeyFromAnyMethod(N, e, {
+        signal: ctrl.signal,
+        timeoutMs: 90000,
+        hints: {
+          publicExponentE: e.toString(),
+          partialPrimeP0: hintPFactorInput.trim() || undefined
+        },
+        onProgress: info => {
+          setSolveStatusMsg(`⏳ ${info.stage} (${(info.elapsedMs / 1000).toFixed(1)}ث)`);
+        }
+      });
+
+      if (ctrl.signal.aborted) return;
+
+      if (rec.success && rec.p && rec.q) {
+        const solvedReport = autoComputePublicExponentForN(
+          N,
+          'standard',
+          bdDelta,
+          BigInt(rec.p),
+          BigInt(rec.q) > 1n ? BigInt(rec.q) : undefined
+        );
+        setAutoExpNotice({
+          ...solvedReport,
+          e: rec.e,
+          d: rec.d ?? undefined,
+          dBits: rec.d ? BigInt(rec.d).toString(2).length : null,
+          notesAr: rec.notesAr
+        });
+        setGeneratedDBits(rec.d ? BigInt(rec.d).toString(2).length : null);
+
+        if (expMode === 'wiener') {
+          setWienerRes({
+            success: Boolean(rec.d),
+            nBits: rec.nBits,
+            eBits: e.toString(2).length,
+            wienerBoundBits: Math.max(1, Math.floor(rec.nBits / 4)),
+            convergentsTested: 0,
+            traceSample: [],
+            recoveredD: rec.d,
+            recoveredK: null,
+            factorP: rec.p,
+            factorQ: rec.q,
+            verifiedProduct: rec.verifiedProduct,
+            verifiedPrimes: rec.verifiedPrimes,
+            durationMs: rec.elapsedMs,
+            strategyUsed: 'any-method-recovery',
+            reasonCode: rec.d ? 'broken' : 'beyond-bound',
+            notesAr: rec.notesAr
+          });
+          setBdRes(null);
+        } else {
+          setBdRes({
+            success: Boolean(rec.d),
+            nBits: rec.nBits,
+            deltaAttempted: bdDelta,
+            latticeDim: 0,
+            m: 0,
+            t: 0,
+            lllSwaps: 0,
+            reducedNormBits: [],
+            recoveredD: rec.d,
+            recoveredK: null,
+            factorP: rec.p,
+            factorQ: rec.q,
+            verifiedProduct: rec.verifiedProduct,
+            verifiedPrimes: rec.verifiedPrimes,
+            durationMs: rec.elapsedMs,
+            notesAr: rec.notesAr
+          });
+          setWienerRes(null);
+        }
+
+        if (onFactorsRecovered && rec.q && rec.q !== '1') {
+          onFactorsRecovered(N.toString(), rec.p, rec.q, rec.winningMethod, rec.elapsedMs);
+        }
+        setSolveStatusMsg(null);
+      } else {
+        setSolveStatusMsg(rec.notesAr);
+        setExpError(rec.notesAr);
+      }
+    } catch (err: any) {
+      setExpError(err?.message || 'خطأ في معطيات الإدخال.');
+    } finally {
+      if (abortCtrlRef.current === ctrl) {
         setExpRunning(false);
       }
-    }, 15);
+    }
   };
 
   const handleGenBatch = (bits = batchBits) => {
@@ -412,7 +604,7 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                       const next = ev.target.checked;
                       setAutoComputeE(next);
                       if (next && rsaNInput.trim() && rsaNInput.trim() !== lastGeneratedNRef.current) {
-                        computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput);
+                        void computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput);
                       }
                     }}
                     className="accent-[#1E3A8A]"
@@ -428,9 +620,10 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                       type="button"
                       onClick={() => {
                         lastGeneratedNRef.current = '';
-                        setHintPFactorInput(currentP || '');
+                        const validP = currentP && currentP !== '???' ? currentP : '';
+                        setHintPFactorInput(validP);
                         setRsaNInput(currentN);
-                        computeAutoEForInputs(currentN, expMode, currentP || '');
+                        void computeAutoEForInputs(currentN, expMode, validP);
                       }}
                       className="text-[11px] font-semibold text-[#1E3A8A] hover:underline"
                     >
@@ -443,7 +636,7 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                   rows={2}
                   value={rsaNInput}
                   onChange={ev => handleManualRsaNChange(ev.target.value)}
-                  placeholder="أدخل المودول العام N (عشري أو 0x...) ليتم حساب الأس العام e تلقائياً..."
+                  placeholder="أدخل المودول العام N (عشري أو 0x...) ليتم إيجاد العوامل وحساب e وλ(N)..."
                   className="w-full p-2.5 bg-white border border-[#E2DDD2] rounded font-mono-tabular text-xs text-[#1C1917] focus:outline-none focus:border-[#1E3A8A]"
                 />
                 <div className="flex items-center justify-between gap-2">
@@ -451,18 +644,24 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput)}
-                      className="text-[11px] font-semibold text-[#1E3A8A] hover:underline"
+                      disabled={resolvingAutoE || expRunning}
+                      onClick={() => {
+                        void computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput);
+                      }}
+                      className="text-[11px] font-semibold text-[#1E3A8A] hover:underline disabled:opacity-50"
                     >
-                      احسب e ضعيف لـ N تلقائياً
+                      إيجاد e الضعيف من λ(N) بأي طريقة
                     </button>
                     <span className="text-[#E2DDD2]">|</span>
                     <button
                       type="button"
-                      onClick={() => computeAutoEForInputs(rsaNInput, 'standard', hintPFactorInput)}
-                      className="text-[11px] text-[#57534E] hover:text-[#1C1917] hover:underline"
+                      disabled={resolvingAutoE || expRunning}
+                      onClick={() => {
+                        void computeAutoEForInputs(rsaNInput, 'standard', hintPFactorInput);
+                      }}
+                      className="text-[11px] text-[#57534E] hover:text-[#1C1917] hover:underline disabled:opacity-50"
                     >
-                      تعيين قياسي (65537)
+                      حساب e القياسي المحقق من λ(N)
                     </button>
                   </div>
                 </div>
@@ -471,6 +670,7 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                   rows={2}
                   value={rsaEInput}
                   onChange={ev => setRsaEInput(ev.target.value)}
+                  placeholder={resolvingAutoE ? 'جارٍ إيجاد العوامل وλ(N) أولاً لتحديد e الفعلي...' : 'سيُحسب تلقائياً بعد إيجاد العوامل وλ(N)...'}
                   className="w-full p-2.5 bg-white border border-[#E2DDD2] rounded font-mono-tabular text-xs text-[#1C1917] focus:outline-none focus:border-[#1E3A8A]"
                 />
 
@@ -490,7 +690,9 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                     />
                     <button
                       type="button"
-                      onClick={() => computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput)}
+                      onClick={() => {
+                        void computeAutoEForInputs(rsaNInput, expMode, hintPFactorInput);
+                      }}
                       className="px-3 py-1.5 rounded bg-white border border-[#E2DDD2] hover:border-[#1E3A8A] text-xs font-semibold text-[#1C1917] shrink-0"
                     >
                       احسب e من φ(N)
@@ -506,26 +708,67 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                         : 'bg-[#F4F0E8] border-[#E2DDD2] text-[#57534E]'
                     }`}
                   >
-                    <div className="font-semibold text-[11px] flex items-center justify-between">
-                      <span>{autoExpNotice.phiComputed ? '✓ تم ضمان وحساب الأس العام بدقة رياضية' : 'ℹ الأس العام القياسي المضمون'}</span>
-                      {autoExpNotice.dBits && <span dir="ltr" className="font-mono-tabular font-bold">|d| = {autoExpNotice.dBits}b</span>}
+                    <div className="font-semibold text-[11px] flex flex-wrap items-center justify-between gap-2">
+                      <span>{autoExpNotice.phiComputed ? '✓ تم حساب λ(N) والأس العام الفعلي بدقة رياضية' : '⏳ بانتظار إيجاد λ(N)'}</span>
+                      <div className="flex items-center gap-2" dir="ltr">
+                        {autoExpNotice.minimalE && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRsaEInput(autoExpNotice.minimalE!);
+                              if (autoExpNotice.minimalD) setGeneratedDBits(BigInt(autoExpNotice.minimalD).toString(2).length);
+                            }}
+                            className="px-2 py-0.5 rounded bg-white border border-[#1E3A8A]/40 text-[#1E3A8A] font-mono text-[10px] hover:bg-[#1E3A8A] hover:text-white"
+                          >
+                            استخدام أصغر أس e_min = {autoExpNotice.minimalE}
+                          </button>
+                        )}
+                        {autoExpNotice.dBits && <span className="font-mono-tabular font-bold">|d| = {autoExpNotice.dBits}b</span>}
+                      </div>
                     </div>
                     {autoExpNotice.lambda && (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono-tabular" dir="ltr">
+                      <div className="grid grid-cols-1 gap-2 text-[11px] font-mono-tabular" dir="ltr">
                         <div className="bg-white/80 p-2 rounded border border-[#E2DDD2]/60">
-                          <span className="text-[10px] text-[#57534E] block">الأس العام الأصغر λ(N) Carmichael</span>
-                          <span className="font-bold text-[#1E3A8A] break-all">{autoExpNotice.lambda.slice(0, 36)}{autoExpNotice.lambda.length > 36 ? '...' : ''}</span>
+                          <div className="flex items-center justify-between gap-2 mb-0.5">
+                            <span className="text-[10px] text-[#57534E]">الأس العام الأصغر الكامل λ(N) Carmichael</span>
+                            <button
+                              type="button"
+                              onClick={() => navigator.clipboard.writeText(autoExpNotice.lambda!)}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-[#F4F0E8] border border-[#E2DDD2] text-[#1E3A8A]"
+                            >
+                              نسخ
+                            </button>
+                          </div>
+                          <span className="font-bold text-[#1E3A8A] break-all select-all block max-h-32 overflow-y-auto">{autoExpNotice.lambda}</span>
                         </div>
                         {autoExpNotice.phi && (
                           <div className="bg-white/80 p-2 rounded border border-[#E2DDD2]/60">
-                            <span className="text-[10px] text-[#57534E] block">مؤشر أويلر φ(N) Euler Totient</span>
-                            <span className="font-bold text-[#1C1917] break-all">{autoExpNotice.phi.slice(0, 36)}{autoExpNotice.phi.length > 36 ? '...' : ''}</span>
+                            <div className="flex items-center justify-between gap-2 mb-0.5">
+                              <span className="text-[10px] text-[#57534E]">مؤشر أويلر الكامل φ(N) Euler Totient</span>
+                              <button
+                                type="button"
+                                onClick={() => navigator.clipboard.writeText(autoExpNotice.phi!)}
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-[#F4F0E8] border border-[#E2DDD2] text-[#1C1917]"
+                              >
+                                نسخ
+                              </button>
+                            </div>
+                            <span className="font-bold text-[#1C1917] break-all select-all block max-h-32 overflow-y-auto">{autoExpNotice.phi}</span>
                           </div>
                         )}
                         {autoExpNotice.d && (
-                          <div className="sm:col-span-2 bg-white/80 p-2 rounded border border-[#E2DDD2]/60">
-                            <span className="text-[10px] text-[#57534E] block">الأس الخاص المحسوب d ≡ e⁻¹ (mod λ(N))</span>
-                            <span className="font-bold text-[#14532D] break-all">{autoExpNotice.d.slice(0, 48)}{autoExpNotice.d.length > 48 ? '...' : ''}</span>
+                          <div className="bg-white/80 p-2 rounded border border-[#E2DDD2]/60">
+                            <div className="flex items-center justify-between gap-2 mb-0.5">
+                              <span className="text-[10px] text-[#57534E]">الأس الخاص المحسوب الكامل d ≡ e⁻¹ (mod λ(N))</span>
+                              <button
+                                type="button"
+                                onClick={() => navigator.clipboard.writeText(autoExpNotice.d!)}
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-[#F4F0E8] border border-[#E2DDD2] text-[#14532D]"
+                              >
+                                نسخ
+                              </button>
+                            </div>
+                            <span className="font-bold text-[#14532D] break-all select-all block max-h-32 overflow-y-auto">{autoExpNotice.d}</span>
                           </div>
                         )}
                       </div>
@@ -535,49 +778,138 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                     </div>
                   </div>
                 )}
+
+                {solveStatusMsg && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-[#1E3A8A]/5 border border-[#1E3A8A]/25 rounded-lg p-2.5 text-xs text-[#1E3A8A]">
+                    <span>{solveStatusMsg}</span>
+                    {(resolvingAutoE || expRunning) && (
+                      <button
+                        type="button"
+                        onClick={stopAnyMethodSearch}
+                        className="px-2.5 py-1 rounded text-[11px] font-bold bg-[#9A3412] text-white hover:bg-[#7C2D12]"
+                      >
+                        إيقاف البحث
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
-              <button
-                onClick={handleRunExpAttack}
-                disabled={expRunning}
-                className="w-full py-2.5 px-4 rounded-lg text-xs font-bold bg-[#1E3A8A] hover:bg-[#172554] text-white transition-colors disabled:opacity-50"
-              >
-                {expRunning
-                  ? 'جارٍ تقليص الشبيكة واستخراج الجذور...'
-                  : expMode === 'wiener'
-                  ? 'تشغيل هجوم Wiener (الكسور المستمرة)'
-                  : 'تشغيل هجوم Boneh–Durfee LLL'}
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    void handleRunExpAttack();
+                  }}
+                  disabled={expRunning || resolvingAutoE}
+                  className="flex-1 py-2.5 px-4 rounded-lg text-xs font-bold bg-[#1E3A8A] hover:bg-[#172554] text-white transition-colors disabled:opacity-50"
+                >
+                  {expRunning
+                    ? 'جارٍ الحل وكسر المفتاح بأي طريقة...'
+                    : expMode === 'wiener'
+                    ? 'تشغيل الهجوم / كسر المفتاح (Wiener + تصعيد تلقائي)'
+                    : 'تشغيل الهجوم / كسر المفتاح (Boneh–Durfee + تصعيد تلقائي)'}
+                </button>
+                {(expRunning || resolvingAutoE) && (
+                  <button
+                    type="button"
+                    onClick={stopAnyMethodSearch}
+                    className="py-2.5 px-4 rounded-lg text-xs font-bold bg-[#9A3412] hover:bg-[#7C2D12] text-white"
+                  >
+                    إيقاف
+                  </button>
+                )}
+              </div>
 
               {expError && <div className="text-xs text-[#9A3412] font-medium">✖ {expError}</div>}
             </div>
           </div>
 
-          {/* Results: Wiener */}
+          {/* Results: Wiener / Any-Method */}
           {wienerRes && (
             <div className="bg-[#FBF9F5] border border-[#E2DDD2] rounded-lg p-4 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#E2DDD2] pb-2.5">
                 <div className={`text-sm font-bold ${wienerRes.success ? 'text-[#14532D]' : 'text-[#9A3412]'}`}>
-                  {wienerRes.success ? '✓ نجاح كسر المفتاح عبر متقاربات الكسور المستمرة (Wiener)' : '▲ لم ينطبق حد فينر'}
+                  {wienerRes.success
+                    ? wienerRes.strategyUsed === 'any-method-recovery'
+                      ? '✓ نجاح الكسر واستخراج الأس الخاص d بأي طريقة ممكنة (إيجاد العوامل وλ(N) أولاً)'
+                      : wienerRes.strategyUsed === 'boneh-durfee-lll'
+                      ? '✓ نجاح الكسر عبر التصعيد التلقائي لشبيكة Boneh–Durfee LLL'
+                      : wienerRes.strategyUsed === 'verheul-van-tilborg'
+                      ? '✓ نجاح الكسر عبر امتداد Verheul–van Tilborg (تجاوز حد فينر)'
+                      : wienerRes.strategyUsed === 'lambda-quotient'
+                      ? '✓ نجاح كسر المفتاح عبر الكسور المستمرة وتعميم λ(N)'
+                      : '✓ نجاح كسر المفتاح عبر متقاربات الكسور المستمرة (Wiener)'
+                    : '▲ لم ينطبق حد فينر'}
                 </div>
                 <div dir="ltr" className="text-xs font-mono-tabular text-[#57534E]">
                   {wienerRes.nBits}b · {wienerRes.convergentsTested} convergents · {wienerRes.durationMs} ms
                 </div>
               </div>
               <p className="text-xs text-[#1C1917]">{wienerRes.notesAr}</p>
+              {!wienerRes.success && (
+                <div className="flex flex-wrap items-center gap-2 bg-white p-3 rounded border border-[#E2DDD2]">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const autoRes = await computeAutoEForInputs(rsaNInput, 'wiener', hintPFactorInput);
+                      if (autoRes && autoRes.phiComputed && autoRes.e) {
+                        const N = parseBig(rsaNInput);
+                        const eWeak = parseBig(autoRes.e);
+                        const r = runWienerAttack(N, eWeak);
+                        setWienerRes(r);
+                        if (r.success && r.factorP && r.factorQ && onFactorsRecovered) {
+                          onFactorsRecovered(N.toString(), r.factorP, r.factorQ, `Wiener CF (${r.nBits}-bit)`, Math.round(r.durationMs));
+                        }
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded text-xs font-bold bg-[#14532D] hover:bg-[#052E16] text-white"
+                  >
+                    إيجاد العوامل وحساب e متوافق مع فينر
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const k = generateWeakWienerRsa(expBits);
+                      lastGeneratedNRef.current = k.n;
+                      setRsaNInput(k.n);
+                      setRsaEInput(k.e);
+                      setGeneratedDBits(k.dBits);
+                      const r = runWienerAttack(BigInt(k.n), BigInt(k.e));
+                      setWienerRes(r);
+                      if (r.success && r.factorP && r.factorQ && onFactorsRecovered) {
+                        onFactorsRecovered(k.n, r.factorP, r.factorQ, `Wiener CF (${r.nBits}-bit)`, Math.round(r.durationMs));
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded text-xs font-semibold bg-[#F4F0E8] border border-[#E2DDD2] hover:border-[#1E3A8A] text-[#1E3A8A]"
+                  >
+                    توليد وكسر مفتاح Wiener ({expBits}b)
+                  </button>
+                  {onLaunchChronos && rsaNInput.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => onLaunchChronos(rsaNInput)}
+                      className="px-3 py-1.5 rounded text-xs font-semibold bg-[#1E3A8A] hover:bg-[#172554] text-white"
+                    >
+                      تصعيد N إلى Chronos v4 للتفكيك المباشر
+                    </button>
+                  )}
+                </div>
+              )}
               {wienerRes.success && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-mono-tabular" dir="ltr">
+                <div className="grid grid-cols-1 gap-3 text-xs font-mono-tabular" dir="ltr">
                   <div className="bg-white p-3 rounded border border-[#E2DDD2]">
                     <div className="text-[10px] text-[#57534E]">Recovered d (verified)</div>
-                    <div className="font-bold text-[#14532D] break-all">{wienerRes.recoveredD}</div>
+                    <div className="font-bold text-[#14532D] break-all select-all">{wienerRes.recoveredD}</div>
                   </div>
-                  <div className="bg-white p-3 rounded border border-[#E2DDD2]">
-                    <div className="text-[10px] text-[#57534E]">Factor p</div>
-                    <div className="text-[#1C1917] break-all">{wienerRes.factorP?.slice(0, 32)}… ({wienerRes.factorP?.length}d)</div>
-                  </div>
-                  <div className="bg-white p-3 rounded border border-[#E2DDD2]">
-                    <div className="text-[10px] text-[#57534E]">Product & Primality</div>
-                    <div className="font-bold text-[#14532D]">p×q==N: {String(wienerRes.verifiedProduct)} · Prime: {String(wienerRes.verifiedPrimes)}</div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                      <div className="text-[10px] text-[#57534E]">Factor p ({wienerRes.factorP?.length} digits)</div>
+                      <div className="text-[#1C1917] break-all select-all">{wienerRes.factorP}</div>
+                    </div>
+                    <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                      <div className="text-[10px] text-[#57534E]">Product & Primality</div>
+                      <div className="font-bold text-[#14532D]">p×q==N: {String(wienerRes.verifiedProduct)} · Prime: {String(wienerRes.verifiedPrimes)}</div>
+                    </div>
                   </div>
                 </div>
               )}
@@ -624,19 +956,27 @@ export const Rsa500PlusLabPanel: React.FC<Rsa500PlusLabPanelProps> = ({
                 </div>
               </div>
               <p className="text-xs text-[#1C1917]">{bdRes.notesAr}</p>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-mono-tabular" dir="ltr">
+              <div className="grid grid-cols-1 gap-3 text-xs font-mono-tabular" dir="ltr">
                 <div className="bg-white p-3 rounded border border-[#E2DDD2]">
-                  <div className="text-[10px] text-[#57534E]">Shortest Vector Norms (bits)</div>
-                  <div className="font-bold text-[#1E3A8A]">[{bdRes.reducedNormBits.join(', ')}]</div>
+                  <div className="text-[10px] text-[#57534E]">Recovered Private Exponent d (Full)</div>
+                  <div className="text-[#14532D] font-bold break-all select-all max-h-36 overflow-y-auto">
+                    {bdRes.recoveredD || '—'}
+                  </div>
                 </div>
-                <div className="bg-white p-3 rounded border border-[#E2DDD2]">
-                  <div className="text-[10px] text-[#57534E]">Recovered d / k</div>
-                  <div className="text-[#1C1917] break-all">{bdRes.recoveredD ? `${bdRes.recoveredD.slice(0, 26)}…` : '—'}</div>
-                </div>
-                <div className="bg-white p-3 rounded border border-[#E2DDD2]">
-                  <div className="text-[10px] text-[#57534E]">Verification</div>
-                  <div className={bdRes.verifiedProduct ? 'text-[#14532D] font-bold' : 'text-[#9A3412]'}>
-                    p×q==N: {String(bdRes.verifiedProduct)} · Prime: {String(bdRes.verifiedPrimes)}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                    <div className="text-[10px] text-[#57534E]">Shortest Vector Norms (bits)</div>
+                    <div className="font-bold text-[#1E3A8A]">[{bdRes.reducedNormBits.join(', ')}]</div>
+                  </div>
+                  <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                    <div className="text-[10px] text-[#57534E]">Factor p</div>
+                    <div className="text-[#1C1917] break-all select-all max-h-24 overflow-y-auto">{bdRes.factorP || '—'}</div>
+                  </div>
+                  <div className="bg-white p-3 rounded border border-[#E2DDD2]">
+                    <div className="text-[10px] text-[#57534E]">Verification</div>
+                    <div className={bdRes.verifiedProduct ? 'text-[#14532D] font-bold' : 'text-[#9A3412]'}>
+                      p×q==N: {String(bdRes.verifiedProduct)} · Prime: {String(bdRes.verifiedPrimes)}
+                    </div>
                   </div>
                 </div>
               </div>
